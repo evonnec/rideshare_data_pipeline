@@ -1,0 +1,30 @@
+# configuration for linters and project
+[project]
+name = "rideshare_data_pipeline"
+dependencies = [
+    "tarfile",
+    "zipfile",
+    "feather",
+    "modin",
+    "pandas",
+    "numpy",
+    "pytest",
+    "pyproject-toml",
+    "mypy",
+    "black",
+    "ruff",
+]
+version = "0.1"
+
+[tool.mypy]
+[[tool.mypy.overrides]]
+module = []
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "src",
+]
+addopts = [
+    "--import-mode=importlib",
+]
