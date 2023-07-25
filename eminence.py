@@ -6,7 +6,6 @@ import csv
 import pytest
 import tarfile
 from zipfile import ZipFile
-import feather
 from datetime import datetime
 
 import modin.pandas as pdm
@@ -337,14 +336,14 @@ class Output:
         df.to_csv(out_csv_file)
 
     def write_df_to_feather(df, out_feather_file):
-        df.to_feather(out_feather_file)
+        df.to_feather(out_feather_file) #TODO: change to parquet
 
 def main():
     tar_file = "Data_Rideshare.tar.bz2"
     #zip_file = "Data_Rideshare.zip"
     path = "extract/"
     csv_file = "Data_Rideshare.csv"
-    feather_file = "Data_Rideshare.feather"
+    feather_file = "Data_Rideshare.feather" #TODO: change to parquet
 
     new_folder = datetime.now().strftime("%Y-%m-%d_%H.%M.%S.%f")
     Retrieve.extract_tar_to_local(tar_file, path + new_folder + "/")
@@ -367,7 +366,7 @@ def main():
     Testdata.test_check_for_duplicates(df)
     #pytest.main() #ideally run pytest on all tests instead of one by one
 
-    Output.write_df_to_feather(df, feather_file)
+    Output.write_df_to_feather(df, feather_file) #TODO: change to parquet
     
 
 if __name__ == "__main__":
