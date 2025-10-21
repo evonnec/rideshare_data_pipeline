@@ -4,7 +4,7 @@ name = "rideshare_data_pipeline"
 dependencies = [
     "modin",
     "pandas==1.5.0",
-    "pyarrow==8.0.0",
+    "pyarrow==14.0.1",
     "pandas-stubs",
     "numpy==1.24.4",
     "pytest",
