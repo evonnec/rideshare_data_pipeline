@@ -159,4 +159,20 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Ruff
+.ruff_cache/
+
+# Editor workspaces
+*.code-workspace
+
+# Legacy virtual environment
 rideshare/
+
+# Data files: never commit raw or derived data
+/extract/
+/data/
+/*.csv
+*.tar.bz2
+*.zip
+*.feather
+*.parquet
