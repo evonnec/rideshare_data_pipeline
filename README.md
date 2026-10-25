@@ -43,7 +43,16 @@ all-null columns: 5 (order_points, order_shipping, SKU, item_id, file_id)
 constant columns: 4 (order_total_qty, item_quantity, digital_transaction, product_category)
 duplicate rows:   0
 wrote:            reports/receipts.parquet (33 columns)
+
+error  PASS  cast_failures                 0/20           0.0000%
+error  PASS  non_negative_total            0/3            0.0000%
+error  PASS  checksum_unique               0/3            0.0000%
+info   PASS  all_null_columns              5/33          15.1515%
+info   PASS  constant_columns              4/33          12.1212%
+error  PASS  duplicate_rows                0/3            0.0000%
 ```
+
+After the summary comes one line per check: severity, `PASS` or `FAIL`, name, failed/evaluated, and the failure rate. A row rule passes while its failure rate is at most its threshold (0 for the two registered rules: `non_negative_total`, `order_total_amount >= 0`, and `checksum_unique`); a null never counts as a failure. Info checks always pass. The check lines don't change the exit status yet.
 
 A column is **all-null** when every value is null. It is **constant** when its non-null values have exactly one distinct value, so nulls are ignored. An all-null column is reported only as all-null. A file with only a header row has no rows to judge, so it reports neither.
 
@@ -61,17 +70,24 @@ Input errors include a missing or unsupported file, an archive that can't be ext
 src/rideshare_data_pipeline/
   __init__.py         __version__, read from the package metadata
   __main__.py         python -m rideshare_data_pipeline
-  cli.py              the rideshare-qc command (argparse): summary, Parquet output, exit codes
+  cli.py              the rideshare-qc command (argparse): summary, check lines, Parquet output, exit codes
   schema.py           the 33 expected columns, the raw all-String schema, the casts and their formats
   io.py               archive extraction (tar filter="data", zip), header and UTF-8 validation,
                       the raw scan, non-strict typing with per-column cast-failure
                       counts, CSV/Parquet writers
   checks/
-    structural.py     all-null and constant columns (one lazy select), duplicate rows
+    __init__.py       the registry (default_rules, default_dataset_checks) and run_checks:
+                      every RowRule is counted in one lazy select, then the samples of
+                      the failing rules are collected in one batch
+    model.py          Severity, CheckResult, RowRule, DatasetCheck
+    arithmetic.py     row rules: non_negative_total (A1)
+    uniqueness.py     row rules: checksum_unique (U1)
+    structural.py     all-null and constant columns (one lazy select), duplicate rows,
+                      and their DatasetCheck wrappers
 tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
-  test_schema.py  test_io.py  test_checks_structural.py  test_cli.py
+  test_schema.py  test_io.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```
 

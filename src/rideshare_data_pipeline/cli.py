@@ -9,10 +9,9 @@ from pathlib import Path
 # None of these import polars at import time (they use PEP 810 lazy imports), so
 # `rideshare-qc --help` and argument errors return without loading it.
 from rideshare_data_pipeline import __version__
-from rideshare_data_pipeline.checks.structural import (
-    degenerate_columns,
-    duplicate_row_count,
-)
+from rideshare_data_pipeline.checks import run_checks
+from rideshare_data_pipeline.checks.model import CheckResult
+from rideshare_data_pipeline.checks.structural import cast_failures_check
 from rideshare_data_pipeline.io import (
     FileFacts,
     InputError,
@@ -21,7 +20,7 @@ from rideshare_data_pipeline.io import (
     read_typed,
     write_parquet,
 )
-from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
+from rideshare_data_pipeline.schema import EXPECTED_COLUMNS, casts
 
 EXIT_OK = 0
 EXIT_DUPLICATES = 1
@@ -53,6 +52,7 @@ class Summary:
     all_null: list[str]
     constant: list[str]
     duplicate_rows: int
+    results: list[CheckResult]
     facts: FileFacts
     output: Path
     output_columns: int
@@ -115,9 +115,13 @@ def run(input_path: Path, out_dir: Path, drop_columns: Sequence[str] = ()) -> Su
     """
     with input_csv(input_path) as csv_path:
         df, facts = read_typed(csv_path)
-    lf = df.lazy()
-    found = degenerate_columns(lf)
-    duplicates = duplicate_row_count(lf)
+    # read_typed raises CastError on any cast failure, so reaching here means there
+    # were none; recording that keeps the S2 line in the report.
+    results = [
+        cast_failures_check(dict.fromkeys(casts(), 0)),
+        *run_checks(df.lazy()),
+    ]
+    by_name = {r.name: r for r in results}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / f"{input_stem(input_path)}.parquet"
@@ -126,13 +130,21 @@ def run(input_path: Path, out_dir: Path, drop_columns: Sequence[str] = ()) -> Su
     return Summary(
         rows=df.height,
         columns=df.width,
-        all_null=found.all_null,
-        constant=found.constant,
-        duplicate_rows=duplicates,
+        all_null=_columns(by_name["all_null_columns"]),
+        constant=_columns(by_name["constant_columns"]),
+        duplicate_rows=by_name["duplicate_rows"].n_failed,
+        results=results,
         facts=facts,
         output=output,
         output_columns=kept.width,
     )
+
+
+def _columns(result: CheckResult) -> list[str]:
+    """The column names an info check recorded in its details."""
+    columns = result.details["columns"]
+    assert isinstance(columns, list)
+    return [str(c) for c in columns]
 
 
 def _names(columns: list[str]) -> str:
@@ -158,6 +170,20 @@ def format_summary(summary: Summary) -> str:
     return "\n".join(f"{f'{label}:':<{width}}{value}" for label, value in lines.items())
 
 
+def format_check(result: CheckResult) -> str:
+    """Render one result as an aligned line: severity, status, name, counts, rate."""
+    rate = "n/a" if result.metric is None else f"{result.metric:.4%}"
+    return (
+        f"{result.severity.value:<5}  {'PASS' if result.passed else 'FAIL'}  "
+        f"{result.name:<20}  {result.n_failed:>9,}/{result.n_evaluated:<9,}  {rate:>9}"
+    )
+
+
+def format_checks(results: Sequence[CheckResult]) -> str:
+    """Render every result, one line each."""
+    return "\n".join(format_check(r) for r in results)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line and return its exit status."""
     args = build_parser().parse_args(argv)
@@ -167,4 +193,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"rideshare-qc: error: {err}", file=sys.stderr)
         return EXIT_INPUT_ERROR
     print(format_summary(summary))
+    print()
+    print(format_checks(summary.results))
     return EXIT_DUPLICATES if summary.duplicate_rows else EXIT_OK

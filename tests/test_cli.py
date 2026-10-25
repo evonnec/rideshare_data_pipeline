@@ -31,7 +31,9 @@ def child_env() -> dict[str, str]:
 
 def summary(stdout: str) -> dict[str, str]:
     """Parse the ``label: value`` summary into a dict of stripped strings."""
-    pairs = (line.split(":", 1) for line in stdout.splitlines())
+    # The summary ends at the first blank line; the check lines follow it.
+    lines = stdout.split("\n\n", 1)[0].splitlines()
+    pairs = (line.split(":", 1) for line in lines)
     return {label.strip(): value.strip() for label, value in pairs}
 
 
@@ -134,7 +136,18 @@ def test_csv_end_to_end(
     out = tmp_path / "out"
     assert main(["--input", str(synthetic_csv), "--out", str(out)]) == 0
 
-    found = summary(capsys.readouterr().out)
+    stdout = capsys.readouterr().out
+    check_lines = stdout.split("\n\n", 1)[1].splitlines()
+    assert [line.split()[2] for line in check_lines] == [
+        "cast_failures",
+        "non_negative_total",
+        "checksum_unique",
+        "all_null_columns",
+        "constant_columns",
+        "duplicate_rows",
+    ]
+    assert all(line.split()[1] == "PASS" for line in check_lines)
+    found = summary(stdout)
     assert found["rows"] == "3"
     assert found["columns"] == "33"
     assert found["all-null columns"] == f"5 ({', '.join(ALL_NULL)})"
