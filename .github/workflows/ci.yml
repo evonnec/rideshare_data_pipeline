@@ -1,0 +1,245 @@
+name: CI
+
+# Job graph:
+#   lint, format, typecheck, test  (parallel; lint also runs the committed-data guard)
+#     -> build                     (wheel + sdist, smoke-tested, uploaded as the "dist" artifact)
+#       -> release                 (v* tag pushes only: checks tag == project version, creates a GitHub Release)
+#         -> publish-pypi          (v* tag pushes only, and only if the repo variable PUBLISH_TO_PYPI is 'true')
+#
+# Python: no job passes `python-version` to setup-uv. uv reads `.python-version` itself and
+# downloads a managed CPython if the runner doesn't have it. Passing `python-version` would
+# export UV_PYTHON and override `.python-version`.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  # No branch filter: stacked PRs target other PR branches, not just main.
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff), lockfile and data guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          # auto = cache on for branch and PR runs, off for tag pushes, so release builds start clean.
+          enable-cache: auto
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Check uv.lock is up to date
+        run: uv lock --check
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Run ruff check
+        run: uv run ruff check --output-format=github .
+      - name: Guard against committed data
+        run: uv run python tools/check_no_data.py
+
+  format:
+    name: Format (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: auto
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Run ruff format --check
+        run: uv run ruff format --check --diff .
+
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: auto
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Run mypy
+        run: uv run mypy .
+
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: auto
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Install dependencies
+        run: uv sync --locked
+      # TODO(coverage): add pytest-cov to the dev group in pyproject.toml (and re-lock), then
+      # append `--cov=rideshare_data_pipeline --cov-report=term --cov-report=xml` below and
+      # add coverage.xml to the uploaded paths.
+      - name: Run pytest
+        run: uv run pytest --junitxml=junit.xml
+      - name: Upload JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit
+          path: junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    name: Build wheel and sdist
+    needs: [lint, format, typecheck, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PACKAGE: rideshare_data_pipeline # import name
+      ENTRY_POINT: rideshare-qc # console script in [project.scripts]; change here if renamed
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          # These files get published, so the build never restores a cache.
+          enable-cache: false
+      # Builds the sdist, then the wheel from the sdist, into dist/. --no-sources builds from
+      # the published metadata only, ignoring any [tool.uv.sources] overrides.
+      - name: Build
+        run: uv build --no-sources
+      - name: Smoke-test the wheel in an isolated environment
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}"
+            exit 1
+          fi
+          wheel=${wheels[0]}
+          # A throwaway environment that holds the wheel and its runtime dependencies and
+          # nothing from the project. python -I keeps the checkout off sys.path.
+          uv run --isolated --no-project --with "$wheel" \
+            python -I -c 'import importlib, sys; m = importlib.import_module(sys.argv[1]); print(m.__name__, "imported from", m.__file__)' "$PACKAGE"
+          uv run --isolated --no-project --with "$wheel" "$ENTRY_POINT" --help
+      - name: Upload dist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release and upload its assets
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+      # Exact string match: tag v0.1 for version "0.1", v1.2.0 for "1.2.0".
+      - name: Check tag matches project version
+        run: |
+          version=$(uv version --short)
+          if [[ "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in pyproject.toml (expected tag v$version)"
+            exit 1
+          fi
+      - name: Download dist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
+
+  # PyPI trusted publishing. One-time setup before setting PUBLISH_TO_PYPI to 'true':
+  #   1. On PyPI, add a pending trusted publisher (Account settings -> Publishing; or the
+  #      project's Settings -> Publishing once it exists) for GitHub Actions with:
+  #        owner and repository: this repo's owner / rideshare_data_pipeline,
+  #        workflow filename: ci.yml, environment name: pypi
+  #   2. In this repo, create the "pypi" environment (Settings -> Environments), ideally
+  #      limited to v* tags with required reviewers.
+  #   3. Set the repository variable PUBLISH_TO_PYPI to 'true'.
+  # Runs after `release`, so a tag that doesn't match the project version never reaches PyPI.
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_TO_PYPI == 'true'
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/rideshare-data-pipeline/
+    permissions:
+      id-token: write # OIDC token for trusted publishing; no API token is stored
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+      # --check-url skips files already on PyPI, so a re-run after a partial upload succeeds.
+      - name: Publish
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
