@@ -6,7 +6,13 @@ from typing import Any
 
 import polars as pl
 import pytest
-from synthetic import ALL_NULL, CONSTANT, synthetic_rows, write_csv_text
+from synthetic import (
+    ALL_NULL,
+    CONSTANT,
+    read_typed_frame,
+    synthetic_rows,
+    write_csv_text,
+)
 
 from rideshare_data_pipeline.checks.structural import (
     DegenerateColumns,
@@ -15,7 +21,7 @@ from rideshare_data_pipeline.checks.structural import (
     degenerate_columns,
     duplicate_row_count,
 )
-from rideshare_data_pipeline.io import read_typed_csv, scan_typed_csv
+from rideshare_data_pipeline.io import read_raw, typed
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
 
 
@@ -115,7 +121,7 @@ def test_header_only_frame_reports_nothing_and_does_not_raise() -> None:
 def test_header_only_csv_reports_nothing(tmp_path: Path) -> None:
     path = tmp_path / "header.csv"
     path.write_text(",".join(EXPECTED_COLUMNS) + "\r\n")
-    lf = scan_typed_csv(path)
+    lf = typed(read_raw(path))
     assert degenerate_columns(lf) == DegenerateColumns(all_null=[], constant=[])
     assert duplicate_row_count(lf) == 0
 
@@ -130,14 +136,14 @@ def test_frame_without_columns() -> None:
 
 def test_synthetic_csv_columns(synthetic_csv: Path) -> None:
     # 3 rows: merchant_name is Uber, Lyft, Uber (first == last, not constant).
-    found = degenerate_columns(scan_typed_csv(synthetic_csv))
+    found = degenerate_columns(typed(read_raw(synthetic_csv)))
     assert found.all_null == list(ALL_NULL)
     assert found.constant == list(CONSTANT)
     assert "merchant_name" not in found.constant
 
 
 def test_wrappers_match_degenerate_columns(synthetic_csv: Path) -> None:
-    lf = read_typed_csv(synthetic_csv).lazy()
+    lf = read_typed_frame(synthetic_csv).lazy()
     assert all_null_columns(lf) == degenerate_columns(lf).all_null
     assert constant_columns(lf) == degenerate_columns(lf).constant
 
@@ -145,7 +151,7 @@ def test_wrappers_match_degenerate_columns(synthetic_csv: Path) -> None:
 def test_both_are_found_in_a_single_query(
     monkeypatch: pytest.MonkeyPatch, synthetic_csv: Path
 ) -> None:
-    lf = scan_typed_csv(synthetic_csv)
+    lf = typed(read_raw(synthetic_csv))
     collect = pl.LazyFrame.collect
     calls: list[pl.LazyFrame] = []
 
@@ -162,7 +168,7 @@ def test_both_are_found_in_a_single_query(
 
 
 def test_detection_leaves_the_frame_unchanged(synthetic_csv: Path) -> None:
-    df = read_typed_csv(synthetic_csv)
+    df = read_typed_frame(synthetic_csv)
     before = df.clone()
     degenerate_columns(df.lazy())
     duplicate_row_count(df.lazy())
@@ -194,4 +200,4 @@ def test_duplicate_row_count(data: dict[str, list[Any]], expected: int) -> None:
 def test_duplicate_row_count_on_the_real_layout(tmp_path: Path) -> None:
     rows = synthetic_rows(3)
     path = write_csv_text(tmp_path / "dups.csv", [*rows, rows[1], rows[1]])
-    assert duplicate_row_count(scan_typed_csv(path)) == 2
+    assert duplicate_row_count(typed(read_raw(path))) == 2

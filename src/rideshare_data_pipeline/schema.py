@@ -1,6 +1,6 @@
-"""The input CSV's columns, the dtype each is parsed to, and the timestamp formats."""
+"""The input CSV's columns, the dtype each is cast to, and the timestamp formats."""
 
-# PEP 810: polars is bound now but only imported when csv_schema() first runs, so
+# PEP 810: polars is bound now but only imported when a schema function first runs, so
 # importing this module (e.g. for EXPECTED_COLUMNS) stays cheap.
 lazy import polars as pl
 
@@ -47,53 +47,71 @@ EXPECTED_COLUMNS: tuple[str, ...] = (
 )
 
 
-def csv_schema() -> pl.Schema:
-    """Return the dtype each column is parsed to, in file order.
+def raw_schema() -> pl.Schema:
+    """Return the schema the CSV is read with: every column as String, in file order.
 
-    polars matches the schema to the header by name and raises SchemaError if a
-    column is missing or extra. This is a function rather than a module constant
-    so that importing the module doesn't import polars; each call returns a new,
-    independent Schema.
+    Reading everything as text means no dtype is inferred and no value is rejected
+    by the reader; typed() then casts, and cast_failures() counts what didn't
+    convert. A function rather than a constant so that importing this module
+    doesn't import polars; each call returns an independent Schema.
     """
-    # Chosen by profiling the full sample (~866 MB, 1.88M rows). Every value
-    # parses as its dtype; empty fields are null.
+    return pl.Schema(dict.fromkeys(EXPECTED_COLUMNS, pl.String()))
+
+
+def casts() -> dict[str, pl.DataType]:
+    """Return the dtype of each column that is cast away from String, in file order.
+
+    The columns left out (names, hashes, IDs, free text) stay String. Chosen by
+    profiling the full sample (~866 MB, 1.88M rows): every value converts, and
+    empty fields are null.
+    """
     ts = pl.Datetime("ms")  # the timestamps carry milliseconds
-    return pl.Schema(
-        {
-            "merchant_name": pl.String(),
-            "user_id": pl.String(),  # 64-hex-digit hash
-            # mostly 19-digit integers (Lyft) or UUIDs (Uber), plus a few other
-            # formats, so not numeric
-            "order_number": pl.String(),
-            "order_time": ts,
-            "email_time": ts,
-            "insert_time": ts,
-            "update_time": ts,
-            "order_total_amount": pl.Float64(),
-            "order_points": pl.Float64(),
-            "order_shipping": pl.Float64(),
-            "order_tax": pl.Float64(),
-            "order_subtotal": pl.Float64(),
-            "order_total_qty": pl.Float64(),  # written as "1.0"
-            "product_description": pl.String(),
-            "product_subtitle": pl.String(),
-            "item_quantity": pl.Float64(),  # written as "1.0"
-            "item_price": pl.Float64(),
-            "digital_transaction": pl.Int64(),  # always 0 in the sample
-            "checksum": pl.String(),  # 32-hex-digit hash
-            "product_reseller": pl.String(),
-            "product_category": pl.String(),
-            "order_discount": pl.Float64(),
-            "SKU": pl.String(),
-            "item_id": pl.String(),
-            "order_pickup": pl.Int64(),  # a code: 0, 1, 3 or 4
-            "from_domain": pl.String(),
-            "email_subject": pl.String(),
-            "delivery_date": ts,
-            "start_source_folder_date": pl.Date(),
-            "end_source_folder_date": pl.Date(),
-            "file_id": pl.String(),
-            "source_dttimestamp": ts,
-            "dttimestamp": ts,
-        }
-    )
+    money = pl.Float64()
+    return {
+        "order_time": ts,
+        "email_time": ts,
+        "insert_time": ts,
+        "update_time": ts,
+        "order_total_amount": money,
+        "order_points": money,
+        "order_shipping": money,
+        "order_tax": money,
+        "order_subtotal": money,
+        # Written as "1.0", which an integer cast would reject.
+        "order_total_qty": pl.Float64(),
+        "item_quantity": pl.Float64(),
+        "item_price": money,
+        "digital_transaction": pl.Int8(),  # a 0/1 flag (always 0 in the sample)
+        "order_discount": money,
+        "order_pickup": pl.Int8(),  # a small code: 0, 1, 3 or 4
+        "delivery_date": ts,
+        "start_source_folder_date": pl.Date(),
+        "end_source_folder_date": pl.Date(),
+        "source_dttimestamp": ts,
+        "dttimestamp": ts,
+        # Not cast, deliberately: user_id, order_number (19-digit integers mixed
+        # with UUIDs), checksum, SKU, item_id and file_id (all empty in the
+        # sample) are identifiers, and an identifier is text.
+    }
+
+
+def cast_expr(column: str, dtype: pl.DataType) -> pl.Expr:
+    """Return an expression casting the String column to dtype; failures become null.
+
+    Timestamps and dates use the explicit formats above (the CSV reader would only
+    infer them). A value that doesn't convert is null, never an error, so that
+    cast_failures() can count it; compare with the raw column to tell a failure
+    from an empty field. Polars' float parser also accepts "1e3", "nan" and "inf".
+    """
+    if isinstance(dtype, pl.Datetime):
+        return pl.col(column).str.to_datetime(
+            TIMESTAMP_FORMAT, time_unit=dtype.time_unit, strict=False
+        )
+    if isinstance(dtype, pl.Date):
+        return pl.col(column).str.to_date(DATE_FORMAT, strict=False)
+    return pl.col(column).cast(dtype, strict=False)
+
+
+def csv_schema() -> pl.Schema:
+    """Return the dtype of every column after typed(), in file order."""
+    return pl.Schema({**raw_schema(), **casts()})

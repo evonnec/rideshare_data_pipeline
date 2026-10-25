@@ -14,10 +14,11 @@ from rideshare_data_pipeline.checks.structural import (
     duplicate_row_count,
 )
 from rideshare_data_pipeline.io import (
+    FileFacts,
     InputError,
     input_csv,
     input_stem,
-    read_typed_csv,
+    read_typed,
     write_parquet,
 )
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
@@ -28,17 +29,18 @@ EXIT_INPUT_ERROR = 2
 
 # The parser keeps this text's line breaks (RawDescriptionHelpFormatter).
 _DESCRIPTION = """\
-Read the rideshare e-receipt CSV (or an archive holding it) with its typed
-schema, print a structural QC summary, and write the data to
-DIR/<input stem>.parquet. Every column and row is kept unless --drop-columns
-names columns to leave out.
+Read the rideshare e-receipt CSV (or an archive holding it): check its UTF-8
+encoding and header, cast the columns to their types, print a structural QC
+summary, and write the data to DIR/<input stem>.parquet. Every column and row is
+kept unless --drop-columns names columns to leave out.
 """
 
 _EPILOG = f"""\
 exit status:
   {EXIT_OK}  success
   {EXIT_DUPLICATES}  exact duplicate rows were found (the Parquet is still written)
-  {EXIT_INPUT_ERROR}  input or parse error, invalid arguments, or unwritable output
+  {EXIT_INPUT_ERROR}  input error (bad encoding or header, values that don't cast to
+      their column's type), invalid arguments, or unwritable output
 """
 
 
@@ -51,6 +53,7 @@ class Summary:
     all_null: list[str]
     constant: list[str]
     duplicate_rows: int
+    facts: FileFacts
     output: Path
     output_columns: int
 
@@ -111,7 +114,7 @@ def run(input_path: Path, out_dir: Path, drop_columns: Sequence[str] = ()) -> Su
     can't be written. Nothing is written until the input has been read.
     """
     with input_csv(input_path) as csv_path:
-        df = read_typed_csv(csv_path)
+        df, facts = read_typed(csv_path)
     lf = df.lazy()
     found = degenerate_columns(lf)
     duplicates = duplicate_row_count(lf)
@@ -126,6 +129,7 @@ def run(input_path: Path, out_dir: Path, drop_columns: Sequence[str] = ()) -> Su
         all_null=found.all_null,
         constant=found.constant,
         duplicate_rows=duplicates,
+        facts=facts,
         output=output,
         output_columns=kept.width,
     )
@@ -137,7 +141,12 @@ def _names(columns: list[str]) -> str:
 
 def format_summary(summary: Summary) -> str:
     """Render the summary as aligned ``label: value`` lines."""
+    facts = summary.facts
     lines = {
+        "encoding": (
+            f"UTF-8, {'BOM' if facts.has_bom else 'no BOM'}, "
+            f"{facts.line_ending.upper()} line endings"
+        ),
         "rows": f"{summary.rows:,}",
         "columns": f"{summary.columns}",
         "all-null columns": _names(summary.all_null),
