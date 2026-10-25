@@ -14,6 +14,9 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import polars as pl
+
+from rideshare_data_pipeline.io import read_raw, typed
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
 
 type Row = dict[str, str]
@@ -133,3 +136,8 @@ def make_zip(path: Path, members: Mapping[str, bytes]) -> Path:
         for name, data in members.items():
             zf.writestr(name, data)
     return path
+
+
+def read_typed_frame(path: Path) -> pl.DataFrame:
+    """Read a CSV through the raw -> typed path and collect it (no failure check)."""
+    return typed(read_raw(path)).collect()

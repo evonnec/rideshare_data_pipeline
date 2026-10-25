@@ -6,7 +6,7 @@ Quality-control and outlier checks for a consumer e-receipt panel sample coverin
 
 A data vendor parses the receipt emails that a panel of long-tenured, active consumers get from rideshare merchants, and delivers one row per receipt: who (a hashed panelist ID), when (trip, email and ingestion times), how much (totals, tax, discounts), what (a free-text product line), and vendor delivery metadata. There is no data dictionary, so the meaning of each field has to be inferred from the data itself. The goal is to design and run practical quality-control and outlier tests on that sample, and to state the assumptions behind them.
 
-This first version reads the file with a strict, typed schema and reports structural problems: columns that are entirely null, columns that hold a single value, and exact duplicate rows. The [roadmap](#roadmap) lists the checks still to come.
+This first version validates the file's UTF-8 encoding and header, reads every column as text, casts the columns to their types while counting any value that doesn't convert, and reports structural problems: columns that are entirely null, columns that hold a single value, and exact duplicate rows. The [roadmap](#roadmap) lists the checks still to come.
 
 ## Data handling
 
@@ -53,7 +53,7 @@ A column is **all-null** when every value is null. It is **constant** when its n
 | 1 | Exact duplicate rows were found. The Parquet file is still written, with every row. |
 | 2 | Input or parse error, invalid arguments, or the output can't be written. The reason is printed to stderr. Nothing is written when the input can't be read. |
 
-Input errors include a missing or unsupported file, an archive that can't be extracted or doesn't hold exactly one CSV, an empty file, a header that doesn't match the 33 expected columns, and values that don't parse as their column's type (the message counts the failures per column). Values are never nulled silently. `python -m rideshare_data_pipeline` works the same way as `rideshare-qc`.
+Input errors include a missing or unsupported file, an archive that can't be extracted or doesn't hold exactly one CSV, an empty file, bytes that aren't valid UTF-8 (the message gives the byte offset), a header with missing, extra, duplicated or reordered columns (the message names them), and values that don't convert to their column's type (the message counts the failures per column). Values are never nulled silently. A UTF-8 BOM is accepted and stripped, and CRLF and LF files read identically; the summary reports both. Known gap: a row with too few fields is padded with nulls, not flagged. `python -m rideshare_data_pipeline` works the same way as `rideshare-qc`.
 
 ## Package layout
 
@@ -62,9 +62,10 @@ src/rideshare_data_pipeline/
   __init__.py         __version__, read from the package metadata
   __main__.py         python -m rideshare_data_pipeline
   cli.py              the rideshare-qc command (argparse): summary, Parquet output, exit codes
-  schema.py           the 33 expected columns, their polars dtypes, timestamp and date formats
-  io.py               archive extraction (tar filter="data", zip), the lazy typed scan,
-                      strict parsing with per-column failure counts, CSV/Parquet writers
+  schema.py           the 33 expected columns, the raw all-String schema, the casts and their formats
+  io.py               archive extraction (tar filter="data", zip), header and UTF-8 validation,
+                      the raw scan, non-strict typing with per-column cast-failure
+                      counts, CSV/Parquet writers
   checks/
     structural.py     all-null and constant columns (one lazy select), duplicate rows
 tests/

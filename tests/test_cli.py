@@ -281,8 +281,8 @@ def _corrupt(tmp_path: Path) -> Path:
     [
         (_missing, "input not found"),
         (_empty, "empty.csv is empty"),
-        (_bad_value, r"don't parse as their dtype: \{'order_time': 1\}"),
-        (_bad_header, "header of hdr.csv doesn't match the schema"),
+        (_bad_value, r"order_time: 1\n"),
+        (_bad_header, "header doesn't match the schema: missing 'merchant_name'"),
         (_unsupported, "unsupported input 'data.json'"),
         (_traversal, "can't extract evil.tar.bz2"),
         (_no_csv, "expected exactly one CSV in nothing.zip, found 0"),
@@ -324,3 +324,52 @@ def test_unwritable_output_exits_2(
     blocker.write_text("not a directory")
     assert main(["--input", str(synthetic_csv), "--out", str(blocker / "out")]) == 2
     assert capsys.readouterr().err.startswith("rideshare-qc: error: ")
+
+
+def test_cast_failures_exit_2_with_per_column_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = synthetic_rows(
+        4,
+        order_total_amount={0: "12,34", 2: "1,234.00"},
+        order_time={1: "2019/01/02 08:00"},
+    )
+    path = write_csv_text(tmp_path / "bad.csv", rows)
+    out = tmp_path / "out"
+    assert main(["--input", str(path), "--out", str(out)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "  order_total_amount: 2\n" in captured.err
+    assert "  order_time: 1" in captured.err
+    assert "order_tax" not in captured.err  # clean columns aren't listed
+    assert not out.exists()
+
+
+def test_invalid_utf8_exits_2_with_the_byte_offset(
+    synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "latin1.csv"
+    data = synthetic_csv.read_bytes()
+    path.write_bytes(data + b"caf\xe9\r\n")
+    assert main(["--input", str(path), "--out", str(tmp_path / "out")]) == 2
+    err = capsys.readouterr().err
+    assert f"byte offset {len(data) + 3:,}" in err
+    assert not (tmp_path / "out").exists()
+
+
+def test_summary_reports_encoding_bom_and_line_endings(
+    synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--input", str(synthetic_csv), "--out", str(tmp_path / "a")]) == 0
+    assert summary(capsys.readouterr().out)["encoding"] == (
+        "UTF-8, no BOM, CRLF line endings"
+    )
+
+    bom_lf = tmp_path / "bom.csv"
+    bom_lf.write_bytes(
+        b"\xef\xbb\xbf" + synthetic_csv.read_bytes().replace(b"\r\n", b"\n")
+    )
+    assert main(["--input", str(bom_lf), "--out", str(tmp_path / "b")]) == 0
+    assert summary(capsys.readouterr().out)["encoding"] == (
+        "UTF-8, BOM, LF line endings"
+    )

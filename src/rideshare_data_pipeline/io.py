@@ -1,8 +1,10 @@
-"""Input and output: archive extraction, the typed CSV scan and the writers."""
+"""Input and output: archive extraction, CSV validation, typed reading and writers."""
 
 import os
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -10,16 +12,25 @@ from typing import Literal
 # use, so importing this module (e.g. from the CLI before it has parsed its
 # arguments) doesn't load polars. Annotations are deferred (PEP 649), so the
 # pl.DataFrame / pl.LazyFrame hints below never force the import either.
+lazy import codecs
+lazy import csv
 lazy import tarfile
 lazy import tempfile
 lazy from zipfile import BadZipFile, ZipFile
 
 lazy import polars as pl
 
-from rideshare_data_pipeline.schema import DATE_FORMAT, TIMESTAMP_FORMAT, csv_schema
+from rideshare_data_pipeline.schema import (
+    DATE_FORMAT,
+    EXPECTED_COLUMNS,
+    TIMESTAMP_FORMAT,
+    cast_expr,
+    casts,
+)
 
 type StrPath = str | os.PathLike[str]
 type InputKind = Literal["csv", "tar", "zip"]
+type LineEnding = Literal["crlf", "lf", "mixed"]
 
 # The input file names recognised, matched against the end of the lowercased name.
 _SUFFIX_KINDS: tuple[tuple[str, InputKind], ...] = (
@@ -40,7 +51,8 @@ class InputError(ValueError):
 
     Raised for a missing or unsupported input file, an archive that can't be
     extracted or doesn't hold exactly one CSV, an empty file, a header that
-    doesn't match the schema, and values that don't parse as their column's dtype.
+    doesn't match the schema, bytes that aren't UTF-8, and values that don't convert
+    to their column's dtype. The subclasses below say which.
     """
 
 
@@ -139,57 +151,232 @@ def input_csv(path: StrPath) -> Iterator[Path]:
         yield extract_archive(path, tmp)
 
 
-def _parse_text(col: str, dtype: pl.DataType, *, strict: bool) -> pl.Expr:
-    """Return an expression converting the text column `col` to `dtype`.
+class HeaderError(InputError):
+    """The header doesn't match the 33 expected columns.
 
-    Timestamps and dates use the explicit formats from the schema module. With
-    strict=False a value that doesn't convert becomes null.
+    The lists name every column at fault, so a message never needs a second look
+    at the file. `reordered` is True when the names are right but their order is
+    not (only judged when nothing is missing, extra or duplicated).
     """
-    if isinstance(dtype, pl.Datetime):
-        return pl.col(col).str.to_datetime(
-            TIMESTAMP_FORMAT, time_unit=dtype.time_unit, strict=strict
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing: Sequence[str] = (),
+        extra: Sequence[str] = (),
+        duplicated: Sequence[str] = (),
+        reordered: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.missing = list(missing)
+        self.extra = list(extra)
+        self.duplicated = list(duplicated)
+        self.reordered = reordered
+
+
+class EncodingError(InputError):
+    """The file isn't valid UTF-8; `offset` is the byte offset of the first bad byte."""
+
+    def __init__(self, message: str, *, offset: int) -> None:
+        super().__init__(message)
+        self.offset = offset
+
+
+class CastError(InputError):
+    """Values are present that don't convert to their column's dtype.
+
+    `counts` maps each affected column to its number of failures; columns without
+    failures are left out.
+    """
+
+    def __init__(self, counts: Mapping[str, int]) -> None:
+        self.counts = dict(counts)
+        detail = "\n".join(f"  {col}: {n:,}" for col, n in self.counts.items())
+        super().__init__(f"values that don't convert to their column's type:\n{detail}")
+
+
+@dataclass(frozen=True, slots=True)
+class FileFacts:
+    """What the byte-level pass learned about a CSV."""
+
+    size_bytes: int
+    has_bom: bool
+    """The file starts with a UTF-8 byte order mark (it is stripped on reading)."""
+
+    line_ending: LineEnding
+    """The style of the line breaks, counting any inside quoted fields. A file
+    with no line break at all is reported as "lf"."""
+
+    header: tuple[str, ...]
+    """The column names, as parsed from the first line (after any BOM)."""
+
+
+# A UTF-8 pass over the 866 MB sample at this chunk size costs about a second;
+# larger chunks don't help, smaller ones add per-call overhead.
+_CHUNK_BYTES = 4 * 1024 * 1024
+_BOM = b"\xef\xbb\xbf"
+
+
+def _line_ending(*, crlf: int, bare_lf: int) -> LineEnding:
+    """Name the style from the counts of "\\r\\n" and lone "\\n" line breaks."""
+    if crlf and bare_lf:
+        return "mixed"
+    return "crlf" if crlf else "lf"
+
+
+def _scan_bytes(path: Path) -> tuple[int, bool, LineEnding]:
+    """Validate the file as UTF-8 in one streaming pass and describe its bytes.
+
+    Returns the size, whether it starts with a BOM, and the line-ending style.
+    Raises EncodingError with the absolute offset of the first invalid byte.
+    """
+    # An incremental decoder keeps a multi-byte sequence that straddles two chunks
+    # buffered, so a chunk boundary is never mistaken for an error.
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    position = crlf = lf = 0
+    has_bom = False
+    previous_tail = b""
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(_CHUNK_BYTES)
+            final = not chunk
+            if position == 0 and chunk:
+                has_bom = chunk.startswith(_BOM)
+            pending = len(decoder.getstate()[0])
+            try:
+                decoder.decode(chunk, final=final)
+            except UnicodeDecodeError as err:
+                # err.start is relative to the buffered bytes plus this chunk.
+                offset = position - pending + err.start
+                what = (
+                    "truncated sequence"
+                    if err.reason.startswith("unexpected end")
+                    else "invalid byte"
+                )
+                msg = f"{path.name} isn't valid UTF-8: {what} at byte offset {offset:,}"
+                raise EncodingError(msg, offset=offset) from err
+            if final:
+                break
+            # Prefix the last byte of the previous chunk so a "\r\n" split across
+            # the boundary is counted once; the tail alone can't hold a pair.
+            data = previous_tail + chunk
+            crlf += data.count(b"\r\n")
+            lf += data.count(b"\n")
+            previous_tail = chunk[-1:]
+            position += len(chunk)
+    return position, has_bom, _line_ending(crlf=crlf, bare_lf=lf - crlf)
+
+
+def _read_header(path: Path) -> tuple[str, ...]:
+    """Parse the first record as CSV (so a quoted comma stays in its name).
+
+    Raises InputError if the file has no content. utf-8-sig drops any BOM.
+    """
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        first = next(csv.reader(f), None)
+    if first is None:
+        msg = f"{path.name} is empty"
+        raise InputError(msg)
+    return tuple(first)
+
+
+def check_header(header: Sequence[str]) -> None:
+    """Raise HeaderError unless header is exactly EXPECTED_COLUMNS, in order.
+
+    Missing, extra, duplicated and reordered columns each get their own report;
+    order matters because polars matches columns by name, and would quietly accept
+    a permuted header.
+    """
+    expected = set(EXPECTED_COLUMNS)
+    counts = Counter(header)
+    missing = [c for c in EXPECTED_COLUMNS if c not in counts]
+    extra = [c for c in dict.fromkeys(header) if c not in expected]
+    duplicated = [c for c, n in counts.items() if n > 1]
+    problems = [
+        f"{label} {', '.join(map(repr, cols))}"
+        for label, cols in (
+            ("missing", missing),
+            ("extra", extra),
+            ("duplicated", duplicated),
         )
-    if isinstance(dtype, pl.Date):
-        return pl.col(col).str.to_date(DATE_FORMAT, strict=strict)
-    return pl.col(col).cast(dtype, strict=strict)
+        if cols
+    ]
+    reordered = False
+    if not problems and tuple(header) != EXPECTED_COLUMNS:
+        reordered = True
+        first = next(
+            i
+            for i, (got, want) in enumerate(zip(header, EXPECTED_COLUMNS, strict=True))
+            if got != want
+        )
+        problems.append(
+            f"columns out of order (column {first + 1} is {header[first]!r}, "
+            f"expected {EXPECTED_COLUMNS[first]!r})"
+        )
+    if problems:
+        msg = f"the header doesn't match the schema: {'; '.join(problems)}"
+        raise HeaderError(
+            msg,
+            missing=missing,
+            extra=extra,
+            duplicated=duplicated,
+            reordered=reordered,
+        )
 
 
-def scan_typed_csv(path: StrPath) -> pl.LazyFrame:
-    """Lazily scan the CSV with the dtypes from schema.csv_schema().
+def inspect_csv(path: StrPath) -> FileFacts:
+    """Validate the file's encoding and header; return what the bytes looked like.
 
-    Nothing is read until the frame is collected. A value that doesn't parse
-    makes the collect raise rather than becoming null, and so does a header that
-    is missing a column or has an extra one (columns are matched by name).
+    Reads the whole file once for UTF-8 validity (about a second per GB), then the
+    first line for the header. Raises EncodingError, HeaderError, or InputError
+    for an empty file.
     """
-    schema = csv_schema()
-    # The CSV reader only infers datetime patterns, so timestamps and dates are
-    # read as text and then parsed with an explicit format.
-    as_text = {
-        col: pl.String() if dtype.is_temporal() else dtype
-        for col, dtype in schema.items()
-    }
-    return pl.scan_csv(Path(path), schema=as_text).with_columns(
-        _parse_text(col, dtype, strict=True)
-        for col, dtype in schema.items()
-        if dtype.is_temporal()
-    )
+    path = Path(path)
+    size, has_bom, line_ending = _scan_bytes(path)
+    header = _read_header(path)
+    check_header(header)
+    return FileFacts(size, has_bom, line_ending, header)
 
 
-def count_parse_failures(path: StrPath) -> dict[str, int]:
-    """Count, per non-text column, the values present that don't parse as its dtype.
+def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFrame:
+    """Lazily scan the CSV with every column as String; nothing is inferred.
 
-    Columns with no failures are left out, so a clean file gives {}.
+    The file is validated first (see inspect_csv) unless the caller has already
+    done so and passes the result as `inspected`. Nothing is read by polars until
+    the frame is collected. Cast it with typed() and count its failures with
+    cast_failures().
     """
-    schema = csv_schema()
-    as_text = pl.scan_csv(Path(path), schema=dict.fromkeys(schema, pl.String()))
-    counts = as_text.select(
-        (pl.col(col).is_not_null() & _parse_text(col, dtype, strict=False).is_null())
-        .sum()
-        .alias(col)
-        for col, dtype in schema.items()
-        if dtype != pl.String
+    path = Path(path)
+    if inspected is None:
+        inspect_csv(path)
+    # polars strips a BOM and accepts CRLF or LF itself. A row with too many
+    # fields makes the collect fail; one with too few is padded with nulls, which
+    # isn't detected (see the ragged-row check planned in the edge-case suite).
+    return pl.scan_csv(path, infer_schema=False)
+
+
+def typed(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Cast the raw frame's columns to the dtypes in schema.casts(), non-strictly.
+
+    A value that doesn't convert becomes null; cast_failures() on the same raw
+    frame says how many did, so nothing is lost silently.
+    """
+    return lf.with_columns(cast_expr(col, dtype) for col, dtype in casts().items())
+
+
+def cast_failures(lf: pl.LazyFrame) -> dict[str, int]:
+    """Count, per cast column, values that are non-null raw but null after the cast.
+
+    `lf` is the raw frame from read_raw(). One lazy aggregation covers every
+    column, so the file is read once. Every column in schema.casts() is a key,
+    with 0 for a clean one.
+    """
+    counts = lf.select(
+        (pl.col(col).is_not_null() & cast_expr(col, dtype).is_null()).sum().alias(col)
+        for col, dtype in casts().items()
     ).collect(engine="streaming")
-    return {col: n for col, n in counts.row(0, named=True).items() if n}
+    return counts.row(0, named=True)
 
 
 def _first_line(err: Exception) -> str:
@@ -197,33 +384,24 @@ def _first_line(err: Exception) -> str:
     return str(err).partition("\n")[0]
 
 
-def read_typed_csv(path: StrPath) -> pl.DataFrame:
-    """Read the CSV into a DataFrame with the schema's dtypes, in one streaming pass.
+def read_typed(path: StrPath) -> tuple[pl.DataFrame, FileFacts]:
+    """Validate the CSV, then read it into a DataFrame with the schema's dtypes.
 
-    Raises InputError (a ValueError) if the file is empty, if its header doesn't
-    match the schema, or if any value doesn't parse as its column's dtype; in the
-    last case the message gives the number of failures per column.
+    The raw frame is scanned twice, both times streaming: once to count cast
+    failures (CastError if there are any, before anything is built), once to cast
+    and collect. Raises InputError (or a subclass) for anything wrong with the
+    file; returns the frame and the byte-level facts.
     """
     name = Path(path).name
+    facts = inspect_csv(path)
+    raw = read_raw(path, inspected=facts)
     try:
-        return scan_typed_csv(path).collect(engine="streaming")
-    except pl.exceptions.NoDataError as err:
-        msg = f"{name} is empty"
-        raise InputError(msg) from err
-    except pl.exceptions.SchemaError as err:
-        msg = f"the header of {name} doesn't match the schema: {_first_line(err)}"
-        raise InputError(msg) from err
-    except (pl.exceptions.ComputeError, pl.exceptions.InvalidOperationError) as err:
-        # The error stops at the first bad batch, so it can't say how many values
-        # are bad; a second pass, taken only on failure, counts them.
-        try:
-            failures = count_parse_failures(path)
-        except pl.exceptions.PolarsError:
-            failures = {}  # malformed in a way the count can't get past either
+        failures = {col: n for col, n in cast_failures(raw).items() if n}
         if failures:
-            msg = f"{name} has values that don't parse as their dtype: {failures}"
-        else:
-            msg = f"can't parse {name}: {_first_line(err)}"
+            raise CastError(failures)
+        return typed(raw).collect(engine="streaming"), facts
+    except pl.exceptions.PolarsError as err:
+        msg = f"can't parse {name}: {_first_line(err)}"
         raise InputError(msg) from err
 
 
