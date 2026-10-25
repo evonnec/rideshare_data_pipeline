@@ -60,12 +60,12 @@ python_version = "3.15"
 strict = true
 # `mypy .` checks both trees; src/ is the import root for the package.
 mypy_path = "src"
-files = ["src", "tests"]
+files = ["src", "tests", "tools"]
 
 [tool.pytest.ini_options]
 minversion = "9.0"
 testpaths = ["tests"]
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "tools"]
 addopts = ["--import-mode=importlib", "-ra"]
 strict = true
 markers = [

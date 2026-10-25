@@ -168,11 +168,19 @@ cython_debug/
 # Legacy virtual environment
 rideshare/
 
-# Data files: never commit raw or derived data
+# Data files: never commit raw or derived data (CI enforces this with tools/check_no_data.py).
+# Small synthetic fixtures under tests/fixtures/ are the only exception.
 /extract/
 /data/
-/*.csv
-*.tar.bz2
+/reports/
+/.cache/
+*.csv
+*.csv.*
+*.tar
+*.tar.*
 *.zip
-*.feather
+*.bz2
 *.parquet
+*.feather
+*.arrow
+!tests/fixtures/**

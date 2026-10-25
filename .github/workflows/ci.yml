@@ -1,7 +1,7 @@
 name: CI
 
 # Job graph:
-#   lint, format, typecheck, test  (parallel)
+#   lint, format, typecheck, test  (parallel; lint also runs the committed-data guard)
 #     -> build                     (wheel + sdist, smoke-tested, uploaded as the "dist" artifact)
 #       -> release                 (v* tag pushes only: checks tag == project version, creates a GitHub Release)
 #         -> publish-pypi          (v* tag pushes only, and only if the repo variable PUBLISH_TO_PYPI is 'true')
@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   lint:
-    name: Lint (ruff) and lockfile
+    name: Lint (ruff), lockfile and data guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -49,6 +49,8 @@ jobs:
         run: uv sync --locked
       - name: Run ruff check
         run: uv run ruff check --output-format=github .
+      - name: Guard against committed data
+        run: uv run python tools/check_no_data.py
 
   format:
     name: Format (ruff)
