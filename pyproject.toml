@@ -3,15 +3,12 @@ name = "rideshare_data_pipeline"
 version = "0.1"
 requires-python = ">=3.15"
 dependencies = [
-    "numpy>=2.5.4",
-    "pandas>=3.1.0",
-    "pyarrow>=26.0.0",
+    "polars>=2.0.0",
 ]
 
 [dependency-groups]
 dev = [
     "mypy>=2.4.0",
-    "pandas-stubs>=3.0.5.260914",
     "pytest>=9.1.1",
     "ruff>=0.17.2",
 ]
@@ -39,10 +36,6 @@ docstring-code-format = true
 [tool.mypy]
 python_version = "3.15"
 strict = true
-
-[[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "9.0"
