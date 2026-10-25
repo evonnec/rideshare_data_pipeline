@@ -209,10 +209,10 @@ def test_cli_end_to_end_on_the_full_fixture(
     full_synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     out = tmp_path / "out"
-    # Only exact duplicate rows change the exit status; the bike's A1 failure doesn't.
-    assert qc_main(["--input", str(full_synthetic_csv), "--out", str(out)]) == 0
+    # The bike's negative total fails A1, an error check, so the run exits 1.
+    assert qc_main(["run", "--input", str(full_synthetic_csv), "--out", str(out)]) == 1
 
-    summary, checks = capsys.readouterr().out.split("\n\n")
+    summary, checks, _outcome = capsys.readouterr().out.split("\n\n")
     fields = dict(line.split(":", 1) for line in summary.splitlines())
     assert fields["encoding"].strip() == "UTF-8, no BOM, CRLF line endings"
     assert fields["rows"].strip() == str(N_ROWS)

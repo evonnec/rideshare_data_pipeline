@@ -1,0 +1,38 @@
+# Example config for `rideshare-qc run --config qc.example.toml`.
+# Every value below is the default; delete what you don't change. Unknown keys and
+# check names are errors (exit status 2), so a typo can't silently do nothing.
+
+sample_limit = 20     # failing rows kept per check (samples/<check>.parquet)
+fail_on = "error"     # "error" or "warn": the lowest severity whose failure exits 1
+                      # (the --fail-on flag overrides this)
+
+# Per check: max_failed_rate (the check passes while failed / evaluated is at most
+# this), severity ("error", "warn" or "info") and enabled (false removes the check).
+
+[checks.cast_failures]       # S2: columns with values that don't convert to their type
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.non_negative_total]  # A1: order_total_amount >= 0
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.checksum_unique]     # U1: checksum is unique
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.all_null_columns]    # S4: columns that are null in every row (info, no threshold)
+severity = "info"
+enabled = true
+
+[checks.constant_columns]    # S5: columns with one distinct non-null value (info)
+severity = "info"
+enabled = true
+
+[checks.duplicate_rows]      # U0: exact duplicate rows
+max_failed_rate = 0.0
+severity = "error"
+enabled = true

@@ -22,7 +22,7 @@ DATA = os.environ.get("RIDESHARE_QC_DATA", "")
     not Path(DATA).is_file(), reason="RIDESHARE_QC_DATA doesn't name a local file"
 )
 def test_cli_on_real_data(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    status = main(["--input", DATA, "--out", str(tmp_path)])
+    status = main(["run", "--input", DATA, "--out", str(tmp_path)])
     assert status in {0, 1}, capsys.readouterr().err
 
     stdout = capsys.readouterr().out
