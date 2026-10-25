@@ -230,7 +230,7 @@ wheels = [
 [[package]]
 name = "rideshare-data-pipeline"
 version = "0.1"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "polars" },
 ]

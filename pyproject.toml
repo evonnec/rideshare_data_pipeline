@@ -1,10 +1,32 @@
 [project]
 name = "rideshare_data_pipeline"
 version = "0.1"
+description = "Quality-control and outlier checks for a consumer e-receipt panel sample covering two rideshare merchants."
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "EvonneC" }]
 requires-python = ">=3.15"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "polars>=2.0.0",
 ]
+
+[project.scripts]
+rideshare-qc = "rideshare_data_pipeline.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
@@ -36,10 +58,16 @@ docstring-code-format = true
 [tool.mypy]
 python_version = "3.15"
 strict = true
+# `mypy .` checks both trees; src/ is the import root for the package.
+mypy_path = "src"
+files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 minversion = "9.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 addopts = ["--import-mode=importlib", "-ra"]
 strict = true
+markers = [
+    "slow: runs on the real data; skipped unless RIDESHARE_QC_DATA names a local file",
+]
