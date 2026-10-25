@@ -14,6 +14,7 @@ from typing import Literal
 # pl.DataFrame / pl.LazyFrame hints below never force the import either.
 lazy import codecs
 lazy import csv
+lazy import hashlib
 lazy import tarfile
 lazy import tempfile
 lazy from zipfile import BadZipFile, ZipFile
@@ -201,6 +202,9 @@ class FileFacts:
     """What the byte-level pass learned about a CSV."""
 
     size_bytes: int
+    sha256: str
+    """Hex SHA-256 of the file's bytes, computed in the same pass as the UTF-8 check."""
+
     has_bom: bool
     """The file starts with a UTF-8 byte order mark (it is stripped on reading)."""
 
@@ -225,15 +229,17 @@ def _line_ending(*, crlf: int, bare_lf: int) -> LineEnding:
     return "crlf" if crlf else "lf"
 
 
-def _scan_bytes(path: Path) -> tuple[int, bool, LineEnding]:
+def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
     """Validate the file as UTF-8 in one streaming pass and describe its bytes.
 
-    Returns the size, whether it starts with a BOM, and the line-ending style.
+    Returns the size, the SHA-256 (hex), whether it starts with a BOM, and the
+    line-ending style; the hash uses the same chunks as the validation.
     Raises EncodingError with the absolute offset of the first invalid byte.
     """
     # An incremental decoder keeps a multi-byte sequence that straddles two chunks
     # buffered, so a chunk boundary is never mistaken for an error.
     decoder = codecs.getincrementaldecoder("utf-8")()
+    digest = hashlib.sha256()
     position = crlf = lf = 0
     has_bom = False
     previous_tail = b""
@@ -241,6 +247,7 @@ def _scan_bytes(path: Path) -> tuple[int, bool, LineEnding]:
         while True:
             chunk = f.read(_CHUNK_BYTES)
             final = not chunk
+            digest.update(chunk)
             if position == 0 and chunk:
                 has_bom = chunk.startswith(_BOM)
             pending = len(decoder.getstate()[0])
@@ -265,7 +272,8 @@ def _scan_bytes(path: Path) -> tuple[int, bool, LineEnding]:
             lf += data.count(b"\n")
             previous_tail = chunk[-1:]
             position += len(chunk)
-    return position, has_bom, _line_ending(crlf=crlf, bare_lf=lf - crlf)
+    ending = _line_ending(crlf=crlf, bare_lf=lf - crlf)
+    return position, digest.hexdigest(), has_bom, ending
 
 
 def _read_header(path: Path) -> tuple[str, ...]:
@@ -333,10 +341,10 @@ def inspect_csv(path: StrPath) -> FileFacts:
     for an empty file.
     """
     path = Path(path)
-    size, has_bom, line_ending = _scan_bytes(path)
+    size, sha256, has_bom, line_ending = _scan_bytes(path)
     header = _read_header(path)
     check_header(header)
-    return FileFacts(size, has_bom, line_ending, header)
+    return FileFacts(size, sha256, has_bom, line_ending, header)
 
 
 def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFrame:

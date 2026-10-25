@@ -63,8 +63,25 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert info.value.code == 0
     out = capsys.readouterr().out
-    assert "--input PATH" in out
-    assert "--drop-columns" in out
+    assert "--version" in out
+    assert "run" in out
+
+
+def test_run_help_documents_options_and_exit_status(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as info:
+        main(["run", "--help"])
+    assert info.value.code == 0
+    out = capsys.readouterr().out
+    for text in (
+        "--input PATH",
+        "--out DIR",
+        "--config FILE",
+        "--fail-on",
+        "--drop-columns",
+    ):
+        assert text in out
     assert "exit status" in out
 
 
@@ -115,8 +132,8 @@ def test_python_dash_m_help() -> None:
 
 @pytest.mark.parametrize(
     "argv",
-    [[], ["--input", "x.csv"], ["--out", "out"]],
-    ids=["no-args", "no-out", "no-input"],
+    [[], ["run"], ["run", "--input", "x.csv"], ["run", "--out", "out"]],
+    ids=["no-command", "no-args", "no-out", "no-input"],
 )
 def test_missing_required_arguments_exit_2(
     argv: list[str], capsys: pytest.CaptureFixture[str]
@@ -134,10 +151,10 @@ def test_csv_end_to_end(
     synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     out = tmp_path / "out"
-    assert main(["--input", str(synthetic_csv), "--out", str(out)]) == 0
+    assert main(["run", "--input", str(synthetic_csv), "--out", str(out)]) == 0
 
     stdout = capsys.readouterr().out
-    check_lines = stdout.split("\n\n", 1)[1].splitlines()
+    check_lines = stdout.split("\n\n")[1].splitlines()
     assert [line.split()[2] for line in check_lines] == [
         "cast_failures",
         "non_negative_total",
@@ -159,7 +176,11 @@ def test_csv_end_to_end(
     written = pl.read_parquet(out / "sample.parquet")
     assert written.schema == csv_schema()
     assert written.height == 3
-    assert sorted(p.name for p in out.iterdir()) == ["sample.parquet"]
+    assert sorted(p.name for p in out.iterdir()) == [
+        "report.json",
+        "report.md",
+        "sample.parquet",
+    ]
 
 
 @pytest.mark.parametrize("name", ["Data.tar.bz2", "Data.zip"])
@@ -179,7 +200,7 @@ def test_archive_end_to_end(
         make_tar(archive, members)
     out = tmp_path / "out"
 
-    assert main(["--input", str(archive), "--out", str(out)]) == 0
+    assert main(["run", "--input", str(archive), "--out", str(out)]) == 0
 
     assert summary(capsys.readouterr().out)["rows"] == "3"
     assert pl.read_parquet(out / "Data.parquet").schema == csv_schema()
@@ -192,8 +213,12 @@ def test_relative_paths_write_only_to_the_named_out_dir(
     synthetic_csv: Path, empty_cwd: Path
 ) -> None:
     (empty_cwd / "in.csv").write_bytes(synthetic_csv.read_bytes())
-    assert main(["--input", "in.csv", "--out", "reports"]) == 0
-    assert sorted(p.name for p in (empty_cwd / "reports").iterdir()) == ["in.parquet"]
+    assert main(["run", "--input", "in.csv", "--out", "reports"]) == 0
+    assert sorted(p.name for p in (empty_cwd / "reports").iterdir()) == [
+        "in.parquet",
+        "report.json",
+        "report.md",
+    ]
     assert sorted(p.name for p in empty_cwd.iterdir()) == ["in.csv", "reports"]
 
 
@@ -201,7 +226,7 @@ def test_header_only_csv_writes_an_empty_parquet(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = write_csv_text(tmp_path / "header.csv", [])
-    assert main(["--input", str(path), "--out", str(tmp_path / "out")]) == 0
+    assert main(["run", "--input", str(path), "--out", str(tmp_path / "out")]) == 0
     found = summary(capsys.readouterr().out)
     assert found["rows"] == "0"
     assert found["all-null columns"] == "0"
@@ -218,7 +243,7 @@ def test_duplicate_rows_exit_1_and_keep_every_row(
     rows = synthetic_rows(3)
     path = write_csv_text(tmp_path / "dups.csv", [*rows, rows[0]])
     out = tmp_path / "out"
-    assert main(["--input", str(path), "--out", str(out)]) == 1
+    assert main(["run", "--input", str(path), "--out", str(out)]) == 1
     assert summary(capsys.readouterr().out)["duplicate rows"] == "1"
     assert pl.read_parquet(out / "dups.parquet").height == 4
 
@@ -229,7 +254,7 @@ def test_duplicate_rows_exit_1_and_keep_every_row(
 def test_drop_columns(synthetic_csv: Path, tmp_path: Path) -> None:
     out = tmp_path / "out"
     argv = ["--input", str(synthetic_csv), "--out", str(out)]
-    assert main([*argv, "--drop-columns", "order_points, SKU,file_id"]) == 0
+    assert main(["run", *argv, "--drop-columns", "order_points, SKU,file_id"]) == 0
     columns = list(pl.read_parquet_schema(out / "sample.parquet"))
     dropped = {"order_points", "SKU", "file_id"}
     assert columns == [c for c in EXPECTED_COLUMNS if c not in dropped]
@@ -241,7 +266,7 @@ def test_drop_columns_rejects_unknown_names(
     out = tmp_path / "out"
     argv = ["--input", str(synthetic_csv), "--out", str(out)]
     with pytest.raises(SystemExit) as info:
-        main([*argv, "--drop-columns", "SKU,nope,also_nope"])
+        main(["run", *argv, "--drop-columns", "SKU,nope,also_nope"])
     assert info.value.code == 2
     assert "not in the schema: nope, also_nope" in capsys.readouterr().err
     assert not out.exists()
@@ -320,7 +345,7 @@ def test_input_errors_exit_2(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     out = tmp_path / "out"
-    assert main(["--input", str(make_input(tmp_path)), "--out", str(out)]) == 2
+    assert main(["run", "--input", str(make_input(tmp_path)), "--out", str(out)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.startswith("rideshare-qc: error: ")
@@ -335,7 +360,9 @@ def test_unwritable_output_exits_2(
 ) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("not a directory")
-    assert main(["--input", str(synthetic_csv), "--out", str(blocker / "out")]) == 2
+    assert (
+        main(["run", "--input", str(synthetic_csv), "--out", str(blocker / "out")]) == 2
+    )
     assert capsys.readouterr().err.startswith("rideshare-qc: error: ")
 
 
@@ -349,7 +376,7 @@ def test_cast_failures_exit_2_with_per_column_counts(
     )
     path = write_csv_text(tmp_path / "bad.csv", rows)
     out = tmp_path / "out"
-    assert main(["--input", str(path), "--out", str(out)]) == 2
+    assert main(["run", "--input", str(path), "--out", str(out)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "  order_total_amount: 2\n" in captured.err
@@ -364,7 +391,7 @@ def test_invalid_utf8_exits_2_with_the_byte_offset(
     path = tmp_path / "latin1.csv"
     data = synthetic_csv.read_bytes()
     path.write_bytes(data + b"caf\xe9\r\n")
-    assert main(["--input", str(path), "--out", str(tmp_path / "out")]) == 2
+    assert main(["run", "--input", str(path), "--out", str(tmp_path / "out")]) == 2
     err = capsys.readouterr().err
     assert f"byte offset {len(data) + 3:,}" in err
     assert not (tmp_path / "out").exists()
@@ -373,7 +400,9 @@ def test_invalid_utf8_exits_2_with_the_byte_offset(
 def test_summary_reports_encoding_bom_and_line_endings(
     synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["--input", str(synthetic_csv), "--out", str(tmp_path / "a")]) == 0
+    assert (
+        main(["run", "--input", str(synthetic_csv), "--out", str(tmp_path / "a")]) == 0
+    )
     assert summary(capsys.readouterr().out)["encoding"] == (
         "UTF-8, no BOM, CRLF line endings"
     )
@@ -382,7 +411,7 @@ def test_summary_reports_encoding_bom_and_line_endings(
     bom_lf.write_bytes(
         b"\xef\xbb\xbf" + synthetic_csv.read_bytes().replace(b"\r\n", b"\n")
     )
-    assert main(["--input", str(bom_lf), "--out", str(tmp_path / "b")]) == 0
+    assert main(["run", "--input", str(bom_lf), "--out", str(tmp_path / "b")]) == 0
     assert summary(capsys.readouterr().out)["encoding"] == (
         "UTF-8, BOM, LF line endings"
     )

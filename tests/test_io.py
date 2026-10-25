@@ -1,6 +1,7 @@
 """Archive extraction, header and encoding validation, typed reads and the writers."""
 
 import datetime as dt
+import hashlib
 import os
 import re
 import subprocess
@@ -82,6 +83,7 @@ def test_read_typed_returns_the_frame_and_facts(synthetic_csv: Path) -> None:
     assert df.height == 3
     assert facts == FileFacts(
         size_bytes=synthetic_csv.stat().st_size,
+        sha256=hashlib.sha256(synthetic_csv.read_bytes()).hexdigest(),
         has_bom=False,
         line_ending="crlf",
         header=EXPECTED_COLUMNS,
@@ -436,7 +438,8 @@ def test_crlf_split_across_a_chunk_boundary_is_counted_once(
     # second; missing the pair would leave a lone "\n" and report "mixed".
     path = tmp_path / "boundary.csv"
     path.write_bytes(b"x" * 1023 + b"\r\n" + b"a\r\n")
-    assert io_module._scan_bytes(path) == (1023 + 2 + 3, False, "crlf")
+    size, _, has_bom, ending = io_module._scan_bytes(path)
+    assert (size, has_bom, ending) == (1023 + 2 + 3, False, "crlf")
 
 
 def test_file_without_a_line_break_is_reported_as_lf(tmp_path: Path) -> None:
@@ -658,3 +661,13 @@ def test_input_csv_rejects_unsupported_names(tmp_path: Path) -> None:
 )
 def test_input_stem_strips_the_whole_suffix(name: str, stem: str) -> None:
     assert input_stem(name) == stem
+
+
+def test_sha256_matches_hashlib_across_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(io_module, "_CHUNK_BYTES", 1024)
+    path = tmp_path / "multi.csv"
+    path.write_bytes(b"x" * 5000 + "caf\u00e9\r\n".encode() * 700)
+    digest = io_module._scan_bytes(path)[1]
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()

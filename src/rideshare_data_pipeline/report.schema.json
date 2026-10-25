@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/rideshare-qc/report.schema.json",
+  "title": "rideshare-qc report.json",
+  "description": "The machine-readable QC report written by `rideshare-qc run`. schema_version changes when a field is removed or changes meaning.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "summary", "checks", "exit_code"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_version", "input_name", "input_sha256", "input_size_bytes", "bom",
+        "line_ending", "rows", "panelists", "window", "started", "finished",
+        "elapsed_seconds", "config"
+      ],
+      "properties": {
+        "tool_version": { "type": "string" },
+        "input_name": { "type": "string", "description": "Base name of the input; never a full path." },
+        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the CSV bytes." },
+        "input_size_bytes": { "type": "integer", "minimum": 0 },
+        "bom": { "type": "boolean", "description": "The CSV starts with a UTF-8 byte order mark." },
+        "line_ending": { "enum": ["crlf", "lf", "mixed"] },
+        "rows": { "type": "integer", "minimum": 0 },
+        "panelists": { "type": "integer", "minimum": 0, "description": "Distinct user_id values." },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "description": "Earliest and latest email_time, ISO 8601; null for a file with no rows.",
+          "properties": {
+            "start": { "type": ["string", "null"] },
+            "end": { "type": ["string", "null"] }
+          }
+        },
+        "started": { "type": "string", "description": "UTC, ISO 8601." },
+        "finished": { "type": "string", "description": "UTC, ISO 8601." },
+        "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fail_on", "sample_limit", "checks"],
+          "description": "The effective configuration, after the TOML file and CLI flags.",
+          "properties": {
+            "fail_on": { "enum": ["error", "warn"] },
+            "sample_limit": { "type": "integer", "minimum": 0 },
+            "checks": {
+              "type": "object",
+              "description": "Effective threshold and severity of every check that ran.",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["threshold", "severity"],
+                "properties": {
+                  "threshold": { "type": ["number", "null"] },
+                  "severity": { "enum": ["error", "warn", "info"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["errors_failed", "warnings_failed", "info", "passed", "total"],
+      "properties": {
+        "errors_failed": { "type": "integer", "minimum": 0 },
+        "warnings_failed": { "type": "integer", "minimum": 0 },
+        "info": { "type": "integer", "minimum": 0, "description": "Number of info-severity checks." },
+        "passed": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name", "check_id", "category", "severity", "passed", "metric",
+          "threshold", "n_failed", "n_evaluated", "predicate", "details", "sample_file"
+        ],
+        "properties": {
+          "name": { "type": "string" },
+          "check_id": { "type": "string" },
+          "category": { "type": "string" },
+          "severity": { "enum": ["error", "warn", "info"] },
+          "passed": { "type": "boolean" },
+          "metric": { "type": ["number", "null"], "description": "The measured value (the failure rate for a row rule); null when nothing was evaluated." },
+          "threshold": { "type": ["number", "null"], "description": "The most the metric may be for the check to pass; null for checks without one." },
+          "n_failed": { "type": "integer", "minimum": 0 },
+          "n_evaluated": { "type": "integer", "minimum": 0 },
+          "predicate": { "type": "string", "description": "The rule a good row or dataset satisfies, in words." },
+          "details": { "type": "object", "description": "Check-specific facts, e.g. the column names an info check found." },
+          "sample_file": { "type": ["string", "null"], "description": "Path of the failing-row sample, relative to the report directory; null when none was written." }
+        }
+      }
+    },
+    "exit_code": { "enum": [0, 1], "description": "The exit status of the run (2 is never written: input errors produce no report)." }
+  }
+}
