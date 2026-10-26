@@ -693,6 +693,151 @@ def _time_section(results: Sequence[CheckResult], run: RunInfo) -> list[str]:
     return out
 
 
+def _outliers_section(results: Sequence[CheckResult]) -> list[str]:
+    """The "Outliers" section body, from ``fare_outlier_conditional`` (O4) and
+    ``fare_outlier_univariate`` (O5)."""
+    by_name = {r.name: r for r in results}
+    o4, o5 = (
+        by_name.get("fare_outlier_conditional"),
+        by_name.get("fare_outlier_univariate"),
+    )
+    if o4 is None and o5 is None:
+        return ["_Not available: both outlier checks are disabled._", ""]
+    out: list[str] = []
+    if o4 is not None:
+        d = o4.details
+        out += [
+            f"**O4, conditional fare outliers ({o4.severity.value}):** k = "
+            f"{_g(d.get('k'))}, flagged {o4.n_failed:,} of {o4.n_evaluated:,} "
+            f"eligible rides (flag rate {_pct(o4.metric)}); "
+            f"{_count(d.get('scored'))} were scored (a segment under "
+            f"{_count(d.get('min_group'))} rows, or with no spread, is not).",
+            "",
+        ]
+        grid = d.get("sensitivity")
+        if isinstance(grid, list) and grid:
+            out += [
+                "Flags by threshold k (a review budget, not a false-positive rate):",
+                "",
+                *_table(
+                    ["k", "flagged", "rate"],
+                    [[_g(g["k"]), f"{g['flagged']:,}", _pct(g["rate"])] for g in grid],
+                    right=(0, 1, 2),
+                ),
+                "",
+            ]
+        direction = d.get("by_direction")
+        if isinstance(direction, Mapping):
+            out += [
+                "Direction of the flagged rides: both prices high is overpriced, both "
+                "low is underpriced or near-zero, mixed is one of each.",
+                "",
+                *_table(
+                    ["direction", "flagged"],
+                    [[name, f"{n:,}"] for name, n in direction.items()],
+                    right=(1,),
+                ),
+                "",
+            ]
+        segments = d.get("by_segment")
+        if isinstance(segments, list):
+            top = [g for g in segments if g["flagged"]][:5]
+            if top:
+                out += [
+                    "Top segments by flags:",
+                    "",
+                    *_table(
+                        ["merchant", "product family", "rides", "flagged", "rate"],
+                        [
+                            [
+                                g["merchant"],
+                                g["family"],
+                                f"{g['rows']:,}",
+                                f"{g['flagged']:,}",
+                                _pct(g["rate"]),
+                            ]
+                            for g in top
+                        ],
+                        right=(2, 3, 4),
+                    ),
+                    "",
+                ]
+        families = d.get("by_family")
+        if isinstance(families, list) and families:
+            out += [
+                "Median price by product family (eligible rides, USD):",
+                "",
+                *_table(
+                    ["product family", "rides", "median $/mile", "median $/minute"],
+                    [
+                        [
+                            g["family"],
+                            f"{g['rows']:,}",
+                            f"{g['median_per_mile']:.2f}",
+                            f"{g['median_per_minute']:.2f}",
+                        ]
+                        for g in families
+                    ],
+                    right=(1, 2, 3),
+                ),
+                "",
+            ]
+    else:
+        out += ["_O4 is disabled._", ""]
+    if o5 is not None:
+        d = o5.details
+        out += [
+            f"**O5, univariate fare outliers ({o5.severity.value}, "
+            f"{d.get('note', 'context only')}):** k = {_g(d.get('k'))}, "
+            f"{o5.n_failed:,} of {o5.n_evaluated:,} rides "
+            f"({_pct(o5.metric)}), {_count(d.get('high'))} high and "
+            f"{_count(d.get('low'))} low. Contrast with O4: a long trip has a high "
+            "fare but an ordinary price per mile.",
+            "",
+        ]
+        merchants = d.get("by_merchant")
+        if isinstance(merchants, Mapping) and merchants:
+            out += [
+                *_table(
+                    ["merchant", "rides", "flagged", "high", "low", "rate"],
+                    [
+                        [
+                            m,
+                            f"{v['rows']:,}",
+                            f"{v['flagged']:,}",
+                            f"{v['high']:,}",
+                            f"{v['low']:,}",
+                            _pct(v["rate"]),
+                        ]
+                        for m, v in merchants.items()
+                    ],
+                    right=(1, 2, 3, 4, 5),
+                ),
+                "",
+            ]
+    out += [
+        "Method: a robust z-score, (x - median) / (1.4826 x MAD), of the log price "
+        "within merchant x product family. A ride is an O4 outlier only when its "
+        "price per mile and its price per minute are both extreme, so long or slow "
+        "trips are not flagged for their length alone. Fares are heavy-tailed and "
+        "grow with distance, which a raw z-score or fence ignores (it flags 1-3% of "
+        "rows, almost all of them long trips). The threshold k sets how many rows "
+        "get reviewed; it is a budget, not a false-positive rate. There is no "
+        "machine learning: a z-score on a log scale says why a row was flagged, "
+        "and an isolation forest flagged different rows without a reason to read.",
+        "",
+    ]
+    return out
+
+
+def _g(value: object) -> str:
+    return f"{value:g}" if isinstance(value, int | float) else "n/a"
+
+
+def _count(value: object) -> str:
+    return f"{value:,}" if isinstance(value, int) else "n/a"
+
+
 def _sample_caption(result: CheckResult, shown: int) -> str:
     """The caption of a sample: "20 of 112 failing rows", or what the count means."""
     group_rows = result.details.get("rows")
@@ -760,6 +905,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out += _parsing_section(results)
     out += ["## Time", ""]
     out += _time_section(results, run)
+    out += ["## Outliers", ""]
+    out += _outliers_section(results)
     out += ["## Column profile", ""]
     all_null = _columns(results, "all_null_columns")
     constant = _columns(results, "constant_columns")

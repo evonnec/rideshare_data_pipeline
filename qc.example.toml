@@ -12,6 +12,8 @@ min_rows = 1          # row_count_band: fewest rows expected (0 = no lower bound
 # At least one check must stay enabled (a config that turns every check off is an error).
 # Per check: max_failed_rate (the check passes while failed / evaluated is at most
 # this), severity ("error", "warn" or "info") and enabled (false removes the check).
+# A check with numbers of its own also takes a [checks.<name>.params] table; an
+# unknown param name, or a value that is not greater than 0, is an error.
 
 [checks.header_valid]        # S1: the 33 expected columns, in order (a bad header exits 2 before this)
 max_failed_rate = 0.0
@@ -179,3 +181,18 @@ enabled = true
 [checks.date_only_order_time]  # T6: per merchant, the share of order_time at exactly midnight (info, no threshold)
 severity = "info"
 enabled = true
+
+[checks.fare_outlier_conditional]  # O4: ride whose $/mile AND $/minute are both extreme (robust log z within merchant x product family)
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.fare_outlier_conditional.params]
+k = 4.0                      # both |robust z| must exceed k; the report shows the flag rate at k = 3, 3.5, 4 and 5
+
+[checks.fare_outlier_univariate]  # O5: |robust z| of log(total) within merchant (context only, never fails)
+severity = "info"
+enabled = true
+
+[checks.fare_outlier_univariate.params]
+k = 3.5

@@ -191,7 +191,7 @@ def test_registry_rules() -> None:
         "order_before_window": Severity.WARN,
         "email_after_update": Severity.WARN,
     }
-    assert len(default_dataset_checks()) == 14
+    assert len(default_dataset_checks()) == 16
 
 
 def test_registered_rules_on_synthetic_data(tmp_path: Path) -> None:

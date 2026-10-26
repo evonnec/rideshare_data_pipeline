@@ -14,7 +14,11 @@ from pathlib import Path
 # `rideshare-qc --help` and argument errors return without loading it.
 from rideshare_data_pipeline import __version__
 from rideshare_data_pipeline.cache import CacheStatus, load_typed
-from rideshare_data_pipeline.checks import default_rules, run_checks
+from rideshare_data_pipeline.checks import (
+    default_dataset_checks,
+    default_rules,
+    run_checks,
+)
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
 from rideshare_data_pipeline.checks.structural import (
     cast_failures_check,
@@ -244,6 +248,9 @@ def run(
             *run_checks(
                 enriched.lazy(),
                 rules=configure_rules(default_rules(), config),
+                dataset_checks=default_dataset_checks(
+                    config.check_params(), config.sample_limit
+                ),
                 sample_limit=config.sample_limit,
             ),
         ],

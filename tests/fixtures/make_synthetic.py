@@ -147,6 +147,8 @@ MANIFEST: dict[str, int] = {
     "O2": 1,  # zero_duration_trip (miles are never 0)
     "O3": 0,  # negative control: nothing exceeds 100 miles or 3 hours
     "O4": 1,  # fare_outlier_10x (implausible_speed has a $/min outlier only)
+    # O5 (info) is the univariate |rz(log total)| > 3.5 within merchant; it is derived
+    # by construction, just below: 2 rows (see MANIFEST["O5"]).
     "U5": 12,  # many_rides_one_day: rows in the over-threshold panelist-day
     "U5.panelist_days": 1,
     "U6": 1,  # overlapping_rides: the earlier trip
@@ -807,6 +809,18 @@ def _date_only_counts(rows: list[Row]) -> dict[str, int]:
 _DATE_ONLY = _date_only_counts(_DEFAULT_ROWS)
 MANIFEST["T6"] = sum(_DATE_ONLY.values())
 MANIFEST.update({f"T6.{merchant}": n for merchant, n in _DATE_ONLY.items()})
+
+
+# O5 by construction. Fares grow with distance (1.5-11 mi), so the log fare of an Uber
+# ride has a median near $13 and a robust scale of about 0.58; |rz| > 3.5 therefore
+# needs a fare above about $100 (or below about $1.70). Exactly two rides are that
+# expensive: fare_outlier_10x ($110.10) and implausible_speed (the typical $/mile for
+# 60 miles, $128.60: a long trip, so O5 flags it and O4 does not, which is the point
+# of the contrast). The next dearest fare is $25.58 and none is below $1.70 (the
+# negative, zero and bike totals are not in the positive population). Lyft has no
+# fare near either end. Both rows are Uber, so 2.
+O5_ROWS = ("fare_outlier_10x", "implausible_speed")
+MANIFEST["O5"] = sum(len(INJECTIONS[name]) for name in O5_ROWS)
 
 
 def write_synthetic_csv(path: Path, seed: int = SEED) -> Path:
