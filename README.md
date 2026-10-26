@@ -94,7 +94,7 @@ Columns, in this order:
 | | `foreign_subject` | Boolean | Spanish or Portuguese subject (an info tag; not a reason on its own) |
 | | `distance_mi`, `distance_unit`, `duration_s`, `product_family` | Float64, Enum, Int64, Enum | the trip, parsed from the description (see [Description parsing](#description-parsing)) |
 | Dedupe | `is_superseded`, `is_cross_panelist_copy` | Boolean | a later version of the receipt supersedes this row; the key was seen under more than one `user_id` (see [Duplicates and dedupe](#duplicates-and-dedupe)) |
-| Spend | `is_usd_rider_spend` | Boolean | rider spend that is not currency-suspect (superseded or not) |
+| Spend | `is_usd_rider_spend` | Boolean | the row counts toward clean USD rider spend: rider spend, not currency-suspect, not superseded, with an amount (exactly `money.usd_rides`) |
 | Check flags | `qc_<check name>` | Boolean | **True means the row fails that check** (never null), one column per row-flagged check |
 | Severity | `qc_error`, `qc_warn` | Boolean | the row fails at least one error- (warn-) severity flag, severities as configured |
 | Names | `qc_flags` | List(String) | the names of the checks the row fails, in report order; an empty list, never null, on a clean row |
@@ -108,7 +108,7 @@ import polars as pl
 
 df = pl.scan_parquet("receipts.curated.parquet")
 # clean USD rider spend
-spend = df.filter(pl.col("is_usd_rider_spend") & ~pl.col("is_superseded"))
+spend = df.filter(pl.col("is_usd_rider_spend"))
 # the warn-severity review queue
 review = df.filter(pl.col("qc_warn"))
 # no error or warn flag
@@ -117,7 +117,7 @@ clean = df.filter(~pl.col("qc_error") & ~pl.col("qc_warn"))
 outliers = df.filter(pl.col("qc_flags").list.contains("fare_outlier_conditional"))
 ```
 
-`is_usd_rider_spend` does not look at `is_superseded` (a superseded row keeps its kind and currency), so add `~is_superseded` for totals, as above.
+`is_usd_rider_spend` already excludes superseded duplicates, so summing `order_total_amount` over its rows gives the report's clean USD rider spend exactly.
 
 ## Archives
 

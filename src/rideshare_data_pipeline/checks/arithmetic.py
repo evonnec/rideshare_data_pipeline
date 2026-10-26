@@ -31,7 +31,6 @@ from rideshare_data_pipeline.checks.model import (
     Severity,
 )
 from rideshare_data_pipeline.dedupe import supersede_flags
-from rideshare_data_pipeline.money import is_usd_rider_spend
 
 RIDE_KINDS: tuple[str, ...] = ("ride", "tip_update")
 """The ride rows: a ride and a tip update (which supersedes the ride it amends)."""
@@ -79,8 +78,17 @@ def residual_cents() -> pl.Expr:
 
 
 def residual_population() -> pl.Expr:
-    """The rows A6 and A7 judge: USD rider-spend ride rows that are not superseded."""
-    return is_usd_rider_spend() & ~pl.col("is_superseded") & is_ride_kind()
+    """The rows A6 and A7 judge: USD rider-spend ride rows that are not superseded.
+
+    Unlike ``money.is_usd_rider_spend`` this keeps rows with a null total, which
+    A7 reports as not computable rather than leaving out.
+    """
+    return (
+        pl.col("is_rider_spend")
+        & ~pl.col("currency_suspect")
+        & ~pl.col("is_superseded")
+        & is_ride_kind()
+    )
 
 
 def unexplained_residual() -> pl.Expr:

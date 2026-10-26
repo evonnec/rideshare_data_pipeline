@@ -53,15 +53,20 @@ AMOUNT = "order_total_amount"
 
 
 def is_usd_rider_spend() -> pl.Expr:
-    """True for rider-spend rows that are not currency-suspect (superseded or not)."""
-    return pl.col("is_rider_spend") & ~pl.col("currency_suspect")
+    """True for the rows counted in clean USD rider spend: rider spend that is not
+    currency-suspect, not superseded, and has an amount. ``usd_rides`` keeps exactly
+    these, so summing the curated column's rows gives the report's clean total."""
+    return (
+        pl.col("is_rider_spend")
+        & ~pl.col("currency_suspect")
+        & ~pl.col("is_superseded")
+        & pl.col(AMOUNT).is_not_null()
+    )
 
 
 def usd_rides[F: (pl.DataFrame, pl.LazyFrame)](frame: F) -> F:
     """The rows every money statistic is computed on (see the module docstring)."""
-    return frame.filter(
-        is_usd_rider_spend() & ~pl.col("is_superseded") & pl.col(AMOUNT).is_not_null()
-    )
+    return frame.filter(is_usd_rider_spend())
 
 
 def positive_usd_rides[F: (pl.DataFrame, pl.LazyFrame)](frame: F) -> F:

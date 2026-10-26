@@ -255,7 +255,9 @@ def test_manifest_counts_hold_in_the_flag_columns(synthetic_run: Run) -> None:
 
 def test_clean_usd_rider_spend_is_a_filter_on_the_flags(synthetic_run: Run) -> None:
     curated = synthetic_run.curated
-    kept = curated.filter(pl.col("is_usd_rider_spend") & ~pl.col("is_superseded"))
+    # The flag alone is the population: no extra ~is_superseded is needed.
+    kept = curated.filter(pl.col("is_usd_rider_spend"))
+    assert not kept["is_superseded"].any()
     assert kept.height == MANIFEST["USD.rides"]
     assert round(kept["order_total_amount"].sum(), 2) == USD_AMOUNT
 
