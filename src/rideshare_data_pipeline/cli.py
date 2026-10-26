@@ -50,6 +50,7 @@ from rideshare_data_pipeline.report import (
     Written,
     exit_code,
     metric_text,
+    render_report,
     summarize,
     write_report,
 )
@@ -230,8 +231,9 @@ def run(
 ) -> Summary:
     """Read the input, run the checks, write the Parquet and the report.
 
-    Raises InputError if the input can't be read, and OSError if the output
-    can't be written. Nothing is written until the input has been read. With a
+    Raises InputError if the input can't be read or a total overflows, and OSError if
+    the output can't be written. Nothing is written until the input has been read
+    and the report built. With a
     `cache_dir` the typed frame comes from, and is saved to, the Parquet cache (see
     cache.py); a cache that can't be used is a warning, never an error.
     """
@@ -270,12 +272,10 @@ def run(
     )
     by_name = {r.name: r for r in results}
 
-    out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / f"{input_stem(input_path)}.curated.parquet"
     flags = row_flags(lf, rules, dataset_checks, results, rule_table)
     plan = curated_plan(lf, flag_table(lf, flags), drop_columns)
     output_columns = plan.collect_schema().len()
-    write_curated(plan, output)
 
     code = exit_code(results, config.fail_on)
     window = df["email_time"]
@@ -309,7 +309,14 @@ def run(
         parquet_name=output.name,
         curated_columns=output_columns,
     )
-    written = write_report(out_dir, results, info, code)
+    # Nothing is written before the report is built: a failure up to here (an
+    # input error, an overflowing total, a bug) leaves --out as it was. The
+    # curated Parquet, the samples and the report files then go out in turn, each
+    # atomically.
+    rendered = render_report(results, info, code)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_curated(plan, output)
+    written = write_report(out_dir, results, rendered)
     return Summary(
         rows=df.height,
         columns=df.width,

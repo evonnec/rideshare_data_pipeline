@@ -372,6 +372,19 @@ class CastError(InputError):
         super().__init__(f"values that don't convert to their column's type:\n{detail}")
 
 
+class TotalOverflowError(InputError):
+    """A sum of finite amounts is not finite: the values are too large to total."""
+
+    def __init__(self, aggregate: str, column: str) -> None:
+        self.aggregate = aggregate
+        self.column = column
+        msg = (
+            f"the {aggregate} of {column} overflows (it is not a finite number): "
+            "the amounts are too large to total"
+        )
+        super().__init__(msg)
+
+
 class RaggedRowError(InputError):
     """A row has too few or too many fields.
 

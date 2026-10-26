@@ -1025,8 +1025,28 @@ class Written:
     samples: tuple[Path, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class Rendered:
+    """report.json and report.md as text, built before anything is written."""
+
+    json_text: str
+    markdown: str
+
+
+def render_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Rendered:
+    """Build both report documents in memory (pure; raises if one can't be built).
+
+    The CLI calls this before it writes any output, so a report that can't be
+    built (strict JSON rejects a non-finite number) leaves nothing behind.
+    """
+    return Rendered(
+        json.dumps(build_report(results, run, code), indent=2, allow_nan=False) + "\n",
+        render_markdown(results, run, code) + "\n",
+    )
+
+
 def write_report(
-    out_dir: Path, results: Sequence[CheckResult], run: RunInfo, code: int
+    out_dir: Path, results: Sequence[CheckResult], rendered: Rendered
 ) -> Written:
     """Write report.json, report.md and samples/<check>.parquet into out_dir.
 
@@ -1051,10 +1071,7 @@ def write_report(
                 r.sample.write_parquet(tmp, compression="zstd")
             samples.append(path)
     json_path = out_dir / "report.json"
-    write_text_atomic(
-        json_path,
-        json.dumps(build_report(results, run, code), indent=2, allow_nan=False) + "\n",
-    )
+    write_text_atomic(json_path, rendered.json_text)
     md_path = out_dir / "report.md"
-    write_text_atomic(md_path, render_markdown(results, run, code) + "\n")
+    write_text_atomic(md_path, rendered.markdown)
     return Written(json_path, md_path, tuple(samples))
