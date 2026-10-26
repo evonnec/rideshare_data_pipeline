@@ -39,6 +39,7 @@ file order). That label is not a CSV column.
     overlapping_rides                 2  two Lyft rides of one panelist that overlap
     many_rides_one_day                12 12 rides, one panelist, one day
     masked_subjects                   2  subjects with an asterisk mask
+    us_spanish_subject                1  Spanish subject, US sender (USD)
 
 Columns that are all-null, constant, or first-equals-last but not constant come
 out of the layout itself (see ALL_NULL and CONSTANT in the tests): the file starts
@@ -114,22 +115,27 @@ MANIFEST: dict[str, int] = {
     "K1.food_order": 2,  # food_orders
     "K1.freight": 1,  # freight
     "K1.tip_update": 1,  # ride_tip_update (the updated receipt)
-    "K1.ride": 284,  # every other row: baseline, injected rides, masked subjects
+    "K1.ride": 285,  # every other row: baseline, injected rides, masked subjects
     "K1.non_spend": 8,  # earnings 1 + pass 3 + bike 1 + food 2 + freight 1
     "V2": 4,  # category 'Travel' on earnings 1 + food 2 + freight 1
     "V3": 1,  # freight sender is person-like
     "S6": 1,  # freight order number 'UF-...' is not a UUID
     # non_us_sender, apac_next_day (a sender country that is not us) and
-    # km_generic_sender. non_us_sender has a Spanish subject too, still 1 row. Its
+    # km_generic_sender. non_us_sender has a Spanish subject too, still 1 row. The
+    # Spanish subject of us_spanish_subject (a US sender, miles) is NOT a reason
+    # (F6): it is tagged by foreign_subject only, so it is not in CUR1. Its
     # 5,718 total and the km row's distance would be $/mile outliers if CUR1 did
     # not gate them out of the USD stats (O4), so O4 must apply the gate.
     "CUR1": 3,
     "CUR1.non_us": 2,
     "CUR1.km_generic": 1,
-    # The population of money.usd_rides: rider-spend rows (293 - 8 non-spend = 285)
+    # Spanish or Portuguese subjects that are not suspect (the US sender's): an
+    # info tag, counted in CUR1's details, in no reason and in no gate.
+    "CUR1.foreign_us": 1,
+    # The population of money.usd_rides: rider-spend rows (294 - 8 non-spend = 286)
     # that are not superseded (3) and not currency-suspect (3). The three groups
     # are disjoint, and every row has a total.
-    "USD.rides": 279,
+    "USD.rides": 280,
     "T2": 0,  # negative control: apac_next_day is within tolerance, Lyft 5 h row too
     "T3": 1,  # ancient_order is > 7 days late (every other lag is <= 2 days)
     "T3.30d": 1,  # ... and > 30 days late
@@ -159,9 +165,9 @@ MANIFEST: dict[str, int] = {
 }
 
 # The sum of order_total_amount over the USD.rides rows: the naive total less what the
-# three groups take off (derived from the rows, then pinned: 9,762.45 - 5,734.35 -
+# three groups take off (derived from the rows, then pinned: 9,770.10 - 5,734.35 -
 # 228.82 - 29.36).
-USD_AMOUNT = 3769.92
+USD_AMOUNT = 3777.57
 
 _FIRST_NAMES = ("Alex", "Sam", "Jordan", "Taylor", "Casey", "Morgan")
 _US_UBER_SENDERS = (
@@ -687,7 +693,6 @@ def _many_rides_one_day(g: _Generator, user: int) -> list[Row]:
 
 
 def _masked_subjects(g: _Generator, user: int) -> list[Row]:
-    # Last, and Uber, so the file ends on the merchant it starts with.
     return [
         g.lyft_trip(
             user,
@@ -703,6 +708,23 @@ def _masked_subjects(g: _Generator, user: int) -> list[Row]:
             _typical_secs(2.6),
             email_subject="Your Friday evening trip with ******",
         ),
+    ]
+
+
+def _us_spanish_subject(g: _Generator, user: int) -> list[Row]:
+    # Last, and Uber, so the file ends on the merchant it starts with. A Spanish
+    # subject from a US sender that states miles is USD: tagged by `foreign_subject`,
+    # but not currency-suspect (owner decision, F6).
+    miles = 3.4
+    return [
+        g.uber_trip(
+            user,
+            date(2019, 5, 4),
+            miles,
+            _typical_secs(miles),
+            from_domain="uber.us@uber.com",
+            email_subject="Tu viaje del sábado por la tarde",
+        )
     ]
 
 
@@ -733,6 +755,7 @@ _BLOCKS: tuple[tuple[str, Callable[[_Generator, int], list[Row]], int], ...] = (
     ("overlapping_rides", _overlapping_rides, 1),
     ("many_rides_one_day", _many_rides_one_day, 1),
     ("masked_subjects", _masked_subjects, 2),
+    ("us_spanish_subject", _us_spanish_subject, 1),
 )
 
 

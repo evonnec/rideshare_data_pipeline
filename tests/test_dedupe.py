@@ -12,7 +12,7 @@ from rideshare_data_pipeline.checks.uniqueness import (
     duplicate_receipts_check,
     near_duplicate_rides_check,
 )
-from rideshare_data_pipeline.dedupe import deduplicated, supersede_flags
+from rideshare_data_pipeline.dedupe import FLAG_NAMES, deduplicated, supersede_flags
 from rideshare_data_pipeline.parse import KINDS
 
 type Spec = dict[str, Any]
@@ -218,10 +218,10 @@ def test_order_and_columns_are_kept_and_nothing_is_dropped() -> None:
         {"c": "c", "order_number": "1", "email_time": t(1)},
     )
     out = supersede_flags(df)
-    assert out.columns == [*df.columns, "is_superseded"]
+    assert out.columns == [*df.columns, "is_superseded", "is_cross_panelist_copy"]
     assert out["checksum"].to_list() == ["a", "b", "c"]
     assert out["is_superseded"].to_list() == [False, False, True]
-    assert out.drop("is_superseded").equals(df)
+    assert out.drop(FLAG_NAMES).equals(df)
 
 
 def test_lazy_frames_give_the_same_flags() -> None:
@@ -243,10 +243,10 @@ def test_dedupe_is_idempotent() -> None:
         {"c": "p2", "email_time": t(2)},
     )
     once = deduplicated(supersede_flags(df))
-    twice = deduplicated(supersede_flags(once.drop("is_superseded")))
+    twice = deduplicated(supersede_flags(once.drop(FLAG_NAMES)))
     assert twice.equals(once)
     assert once.height == 3 + 2  # one per key, and both null-key rows
-    assert not supersede_flags(once.drop("is_superseded"))["is_superseded"].any()
+    assert not supersede_flags(once.drop(FLAG_NAMES))["is_superseded"].any()
 
 
 # --- U2, U2b ------------------------------------------------------------------------
@@ -368,6 +368,104 @@ def test_u3_counts_rows_of_keys_under_several_panelists() -> None:
     assert (res.check_id, res.severity.value, res.passed) == ("U3", "warn", False)
     assert (res.n_failed, res.n_evaluated) == (2, 4)
     assert res.details["groups"] == 1
+
+
+def copies(*rows: Spec) -> list[str]:
+    """Checksums of the rows flagged ``is_cross_panelist_copy``, sorted."""
+    df = supersede_flags(receipts(*rows))
+    return sorted(df.filter("is_cross_panelist_copy")["checksum"])
+
+
+CROSS: list[tuple[str, list[Spec], list[str]]] = [
+    (
+        "one key under two panelists: both rows are copies, one is superseded",
+        [
+            {"c": "a", "order_number": "1", "user_id": "u1"},
+            {"c": "b", "order_number": "1", "user_id": "u2", "email_time": t(2)},
+        ],
+        ["a", "b"],
+    ),
+    (
+        "one panelist twice is a re-send, not a cross-panelist copy",
+        [
+            {"c": "a", "order_number": "1", "user_id": "u1"},
+            {"c": "b", "order_number": "1", "user_id": "u1", "email_time": t(2)},
+        ],
+        [],
+    ),
+    (
+        "a third row of the same panelist is flagged with the group",
+        [
+            {"c": "a", "order_number": "1", "user_id": "u1"},
+            {"c": "b", "order_number": "1", "user_id": "u2"},
+            {"c": "c", "order_number": "1", "user_id": "u1", "email_time": t(2)},
+        ],
+        ["a", "b", "c"],
+    ),
+    (
+        "a null user is not a second panelist",
+        [
+            {"c": "a", "order_number": "1", "user_id": "u1"},
+            {"c": "b", "order_number": "1", "user_id": None},
+        ],
+        [],
+    ),
+    (
+        "rows without a key are never copies",
+        [
+            {"c": "a", "order_number": None, "user_id": "u1"},
+            {"c": "b", "order_number": None, "user_id": "u2"},
+        ],
+        [],
+    ),
+    (
+        "same order number at the other merchant is another key",
+        [
+            {"c": "a", "order_number": "1", "user_id": "u1"},
+            {"c": "b", "order_number": "1", "user_id": "u2", "merchant_name": "Lyft"},
+        ],
+        [],
+    ),
+    (
+        "a key held by one panelist next to a shared one",
+        [
+            {"c": "a", "order_number": "1", "user_id": "u1"},
+            {"c": "b", "order_number": "1", "user_id": "u2"},
+            {"c": "c", "order_number": "2", "user_id": "u1"},
+        ],
+        ["a", "b"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "rows", "expected"), CROSS, ids=[c[0] for c in CROSS]
+)
+def test_is_cross_panelist_copy(
+    label: str, rows: list[Spec], expected: list[str]
+) -> None:
+    assert copies(*rows) == expected
+
+
+def test_cross_panelist_flag_is_not_a_superseded_flag_and_matches_u3() -> None:
+    df = receipts(
+        {"c": "a", "order_number": "1", "user_id": "u1"},
+        {"c": "b", "order_number": "1", "user_id": "u2"},
+        {"c": "c", "order_number": "2", "user_id": "u1"},
+        {"c": "d", "order_number": "2", "user_id": "u1", "email_time": t(2)},
+        {"c": "e", "order_number": None, "user_id": "u1"},
+        {"c": "f", "order_number": None, "user_id": "u2"},
+    )
+    flagged = supersede_flags(df)
+    # The copy that lost the dedupe is superseded for panel totals but is still a
+    # copy, so a per-panelist statistic can attribute the receipt to both panelists.
+    assert flagged.filter("is_cross_panelist_copy")["is_superseded"].to_list() == [
+        True,
+        False,
+    ]
+    res = cross_panelist_check(flagged.lazy())
+    assert res.n_failed == flagged["is_cross_panelist_copy"].sum() == 2
+    assert flagged["is_cross_panelist_copy"].null_count() == 0
 
 
 # --- U4 -----------------------------------------------------------------------------

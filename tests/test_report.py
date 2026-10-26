@@ -198,7 +198,7 @@ def test_report_json_content_matches_the_manifest(
     assert run["input_name"] == "synthetic.csv"
     assert str(tmp_path) not in json.dumps(report)  # no local path leaks
     assert run["tool_version"] == __version__
-    assert run["rows"] == 293
+    assert run["rows"] == 294
     assert (
         run["panelists"]
         == pl.read_parquet(out / "synthetic.parquet")["user_id"].n_unique()
@@ -344,7 +344,7 @@ def test_spend_in_json_and_markdown(full_synthetic_csv: Path, tmp_path: Path) ->
     text = (out / "report.md").read_text(encoding="utf-8")
     section = text.split("## Spend")[1].split("## Description parsing")[0]
     assert "| minus currency-suspect rows (local currency) | 3 | -5,734.35 |" in section
-    assert "| **= clean USD rider spend** | 279 | 3,769.92 |" in section
+    assert "| **= clean USD rider spend** | 280 | 3,777.57 |" in section
     assert "| non_us_sender | 2 |" in section
     assert "| co | 1 |" in section
     assert "not summable as USD" in section
@@ -396,7 +396,7 @@ def test_threshold_override_makes_the_check_pass_and_shows_in_the_report(
     assert isinstance(run, dict)
     assert run["config"]["checks"]["non_negative_total"]["threshold"] == 0.01
     assert not (out / "samples").exists()
-    assert "| non_negative_total | error | PASS | 1 | 0.3509% | 0.01 |" in (
+    assert "| non_negative_total | error | PASS | 1 | 0.3497% | 0.01 |" in (
         out / "report.md"
     ).read_text(encoding="utf-8")
 

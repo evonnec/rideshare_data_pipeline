@@ -28,9 +28,16 @@ The file has no currency column, and receipts from non-US merchant senders state
 amounts in local currency. ``currency_reason`` says why a row is suspect, the first
 of: ``non_us_sender`` (``sender_country`` is neither us nor null; see
 ``sender.py``), ``km_unit`` (the description states kilometres, which a US sender's
-receipt does not) and ``foreign_language`` (a Spanish or Portuguese subject; see
-``_FOREIGN_SUBJECT``). ``currency_suspect`` is true where there is a reason. Rows are
-flagged, never dropped, and no exchange rate is applied.
+receipt does not) and ``foreign_language`` (a Spanish or Portuguese subject, from a
+sender that is not a US one; see ``_FOREIGN_SUBJECT``). ``currency_suspect`` is true
+where there is a reason. Rows are flagged, never dropped, and no exchange rate is
+applied.
+
+A Spanish or Portuguese subject from a US sender is **not** a currency reason: in
+the full sample all 2,552 such rows come from US senders, state miles where they
+state a distance, and cost a median $2.38/mile, in line with USD. The language
+stays findable as the info flag ``foreign_subject`` (true for any such subject,
+suspect or not), which gates nothing.
 
 Precedence
 ----------
@@ -55,7 +62,7 @@ from collections.abc import Mapping
 lazy import polars as pl
 
 from rideshare_data_pipeline.dedupe import FLAG_NAMES
-from rideshare_data_pipeline.sender import NON_US_EXEMPT, sender_country
+from rideshare_data_pipeline.sender import NON_US_EXEMPT, US, sender_country
 
 type Kind = str
 """One of KINDS."""
@@ -322,13 +329,18 @@ def foreign_subject() -> pl.Expr:
 
 
 def _reason(country: pl.Expr, km: pl.Expr, foreign: pl.Expr) -> pl.Expr:
-    """The first currency reason that holds (see CURRENCY_REASONS), else null."""
+    """The first currency reason that holds (see CURRENCY_REASONS), else null.
+
+    ``foreign_language`` needs a sender that isn't a US one (here: a generic sender
+    with no country, since a country other than us is already ``non_us_sender``); a
+    km description is ``km_unit`` before it gets there.
+    """
     return (
         pl.when(country.is_not_null() & ~country.is_in(NON_US_EXEMPT))
         .then(pl.lit("non_us_sender"))
         .when(km.fill_null(False))
         .then(pl.lit("km_unit"))
-        .when(foreign)
+        .when(foreign & ~country.eq(US).fill_null(False))
         .then(pl.lit("foreign_language"))
         .cast(pl.Enum(CURRENCY_REASONS))
     )
@@ -472,6 +484,7 @@ DERIVED_NAMES: tuple[str, ...] = (
     "sender_country",
     "currency_reason",
     "currency_suspect",
+    "foreign_subject",
     "distance_mi",
     "distance_unit",
     "duration_s",
@@ -498,6 +511,7 @@ def derived_columns() -> list[pl.Expr]:
         sender_country(),
         currency_reason(),
         currency_suspect(),
+        foreign_subject().alias("foreign_subject"),
         distance_mi(),
         distance_unit(),
         duration_s(),
@@ -546,7 +560,10 @@ def with_derived(df: pl.DataFrame) -> pl.DataFrame:
             _seconds(raw).alias("duration_s"),
             _family(raw).alias("product_family"),
         )
-        .with_columns(pl.col("currency_reason").is_not_null().alias("currency_suspect"))
+        .with_columns(
+            pl.col("currency_reason").is_not_null().alias("currency_suspect"),
+            pl.col(_FOREIGN).alias("foreign_subject"),
+        )
         .drop(temp)
         .select(*df.columns, *DERIVED_NAMES)
     )

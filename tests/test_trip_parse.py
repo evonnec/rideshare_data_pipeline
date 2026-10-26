@@ -323,9 +323,53 @@ def test_pc1_adds_the_dedupe_flag_when_missing() -> None:
         pl.lit(None, dtype=pl.Datetime).alias("email_time"),
         pl.lit(None, dtype=pl.Datetime).alias("update_time"),
         pl.lit(None, dtype=pl.String).alias("checksum"),
+        pl.lit("u1").alias("user_id"),
     )
     res = description_parse_coverage_check(lf)
     assert res.n_evaluated == 1
+
+
+STUBS = [
+    "Increase Tip",
+    "Tip Increase",
+    "  increase tip ",
+    "TIP INCREASE",
+    "tip increase\t",
+]
+
+
+@pytest.mark.parametrize("stub", STUBS)
+def test_pc1_leaves_out_the_tip_update_stubs(stub: str) -> None:
+    rows = [
+        ("Uber", "ride", OK, None),
+        ("Uber", "tip_update", stub, None),
+        ("Uber", "tip_update", "Weird 7", None),  # a real unparsed row stays in
+    ]
+    res = description_parse_coverage_check(pc1_frame(rows))
+    assert (res.n_failed, res.n_evaluated) == (1, 2)
+    assert res.details["merchants"] == {
+        "Uber": {"rows": 2, "parsed": 1, "coverage": pytest.approx(0.5)}
+    }
+
+
+def test_pc1_keeps_a_stub_text_that_is_not_exactly_a_stub() -> None:
+    rows = [("Uber", "tip_update", "Increase Tip 5", None), ("Uber", "ride", OK, None)]
+    res = description_parse_coverage_check(pc1_frame(rows))
+    assert (res.n_failed, res.n_evaluated) == (1, 2)
+
+
+def test_pc1_labels_its_metric_as_the_worst_merchant_rate() -> None:
+    rows = [
+        ("Uber", "ride", OK, None),
+        ("Uber", "ride", OK, None),
+        ("Lyft", "ride", "Weird 7", None),
+        ("Lyft", "ride", OK, None),
+    ]
+    res = description_parse_coverage_check(pc1_frame(rows))
+    assert res.details["metric_label"] == "worst merchant unparsed rate"
+    # n_failed / n_evaluated pools the merchants; the metric is the worst one's rate
+    assert (res.n_failed, res.n_evaluated) == (1, 4)
+    assert res.metric == 0.5
 
 
 def test_pc1_empty_population_passes() -> None:

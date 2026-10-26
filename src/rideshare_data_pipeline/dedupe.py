@@ -1,9 +1,9 @@
 """The dedupe policy: flag the receipts that a later version supersedes.
 
-Rows are never dropped here. ``supersede_flags`` adds the boolean column
-``is_superseded``; ``deduplicated`` is the view that spend metrics use (the rows
-that are not superseded). The curated Parquet with its flag columns is a later
-step; the output Parquet of a run is unchanged.
+Rows are never dropped here. ``supersede_flags`` adds the boolean columns
+``is_superseded`` and ``is_cross_panelist_copy``; ``deduplicated`` is the view that
+spend metrics use (the rows that are not superseded). The curated Parquet with
+its flag columns is a later step; the output Parquet of a run is unchanged.
 
 Why
 ---
@@ -33,6 +33,19 @@ Policy
   again supersedes nothing.
 * Rows near-identical but under different order numbers (check U4) are only
   reported, never superseded.
+
+Cross-panelist copies
+---------------------
+``is_cross_panelist_copy`` is true for every row of a non-null key group that holds
+more than one distinct non-null ``user_id``: the same receipt in two panelists'
+mailboxes. The dedupe keeps one row per key for panel totals (a receipt is one
+purchase), so the losing copy is superseded. A per-panelist statistic (checks from
+#26 on: a panelist's spend, trip count or tenure) is about what each panelist
+received, so it must not start from the deduplicated rows alone: it takes the
+non-superseded rows plus the superseded rows that have the flag, and counts a shared
+receipt once for each panelist it reached. The flag is not an input column, so the
+structural checks ignore it (``parse.input_columns``). U3 counts the rows that have
+it.
 """
 
 lazy import polars as pl
@@ -42,11 +55,12 @@ KEY: tuple[str, str] = ("merchant_name", "order_number")
 PRIORITY_KINDS: tuple[str, ...] = ("tip_update", "fare_correction")
 """Kinds that supersede the other versions of a receipt."""
 
-FLAG_NAMES: tuple[str, ...] = ("is_superseded",)
+FLAG_NAMES: tuple[str, ...] = ("is_superseded", "is_cross_panelist_copy")
 """The columns supersede_flags() adds."""
 
 _ROW = "_row"
 _WINNER = "_winner"
+_CROSS = "_cross"
 
 
 def has_key() -> pl.Expr:
@@ -70,26 +84,41 @@ def winner_order() -> list[pl.Expr]:
 
 
 def supersede_flags[F: (pl.DataFrame, pl.LazyFrame)](frame: F) -> F:
-    """Add ``is_superseded`` to a frame that has the derived ``receipt_kind``.
+    """Add ``is_superseded`` and ``is_cross_panelist_copy`` to a frame that has the
+    derived ``receipt_kind``.
 
-    Only the rows of repeated keys are sorted, so the cost follows the (small)
-    number of duplicates rather than the frame. Row order and all other columns
-    are unchanged.
+    Only the rows of repeated keys are sorted or grouped, so the cost follows the
+    (small) number of duplicates rather than the frame. Row order and all other
+    columns are unchanged.
     """
     indexed = frame.with_row_index(_ROW)
     repeated = in_repeated_key()
+    shared = indexed.filter(repeated)
     winners = (
-        indexed.filter(repeated)
-        .sort(winner_order(), descending=True, nulls_last=True, maintain_order=True)
+        shared.sort(
+            winner_order(), descending=True, nulls_last=True, maintain_order=True
+        )
         .unique(subset=KEY, keep="first")
         .select(pl.col(_ROW), pl.lit(True).alias(_WINNER))
     )
+    # Keys that reached more than one panelist; nulls are not a panelist.
+    cross_keys = (
+        shared.group_by(KEY)
+        .agg(pl.col("user_id").drop_nulls().n_unique().alias("_users"))
+        .filter(pl.col("_users") > 1)
+        .select(KEY)
+    )
+    cross = shared.join(cross_keys, on=KEY, how="semi").select(
+        pl.col(_ROW), pl.lit(True).alias(_CROSS)
+    )
     return (
         indexed.join(winners, on=_ROW, how="left", maintain_order="left")
+        .join(cross, on=_ROW, how="left", maintain_order="left")
         .with_columns(
             (repeated & pl.col(_WINNER).is_null()).alias("is_superseded"),
+            pl.col(_CROSS).is_not_null().alias("is_cross_panelist_copy"),
         )
-        .drop(_ROW, _WINNER)
+        .drop(_ROW, _WINNER, _CROSS)
     )
 
 

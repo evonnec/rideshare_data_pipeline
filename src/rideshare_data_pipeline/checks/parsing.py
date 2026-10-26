@@ -18,6 +18,12 @@ from rideshare_data_pipeline.parse import FAMILIES
 COVERAGE_KINDS: tuple[str, ...] = ("ride", "tip_update")
 """Kinds whose description is expected to state a trip."""
 
+TIP_STUBS: tuple[str, ...] = ("increase tip", "tip increase")
+"""Descriptions (trimmed, lower case) of a tip update's stub line. They name no trip,
+so they can never carry a distance or a duration and are left out of PC1."""
+
+METRIC_LABEL = "worst merchant unparsed rate"
+
 MIN_COVERAGE = 0.98
 MAX_UNPARSED = 0.02
 """PC1 passes while every merchant's unparsed rate is at most this."""
@@ -31,12 +37,23 @@ NO_VALUE = "(none)"
 
 
 def _population(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Ride and tip-update rows that are not superseded, with ``parsed`` and shape."""
+    """Ride and tip-update rows that are not superseded, with ``parsed`` and shape.
+
+    The tip-update stubs (``Increase Tip``, ``Tip Increase``) are not in it.
+    """
     if "is_superseded" not in lf.collect_schema().names():
         lf = supersede_flags(lf)
+    stub = (
+        pl.col("product_description")
+        .str.strip_chars()
+        .str.to_lowercase()
+        .is_in(TIP_STUBS)
+        .fill_null(False)
+    )
     return lf.filter(
         pl.col("receipt_kind").cast(pl.String).is_in(COVERAGE_KINDS)
         & ~pl.col("is_superseded")
+        & ~stub
     ).with_columns(
         pl.col("merchant_name").fill_null(NO_MERCHANT).alias("merchant"),
         (
@@ -58,10 +75,12 @@ def _shape() -> pl.Expr:
 def description_parse_coverage_check(lf: pl.LazyFrame) -> CheckResult:
     """PC1 (warn): every merchant parses at least 98% of its ride rows.
 
-    Population: rows of kind ride or tip_update that are not superseded. A row is
+    Population: rows of kind ride or tip_update that are not superseded, without
+    the tip-update stubs (TIP_STUBS), which can't carry a distance. A row is
     parsed when both ``distance_mi`` and ``duration_s`` are non-null. ``metric`` is
-    the worst merchant's unparsed rate, ``threshold`` 0.02, ``n_failed`` the
-    unparsed rows and ``n_evaluated`` the population.
+    the **worst merchant's** unparsed rate (``details["metric_label"]``), not
+    ``n_failed / n_evaluated``, which pools the merchants; ``threshold`` is 0.02,
+    ``n_failed`` the unparsed rows and ``n_evaluated`` the population.
 
     ``details``: ``merchants`` (``{merchant: {rows, parsed, coverage}}``), ``units``
     (rows per ``distance_unit``), ``families`` (``{merchant: {family: rows}}``, all
@@ -115,6 +134,7 @@ def description_parse_coverage_check(lf: pl.LazyFrame) -> CheckResult:
             f"(coverage >= {MIN_COVERAGE:.0%})"
         ),
         details={
+            "metric_label": METRIC_LABEL,
             "merchants": merchants,
             "units": dict(
                 units.sort(
