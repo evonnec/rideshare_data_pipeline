@@ -1,5 +1,6 @@
 """The opt-in Parquet cache: hits, misses, validity rules and failure handling."""
 
+import ast
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import rideshare_data_pipeline.io as io_module
 from rideshare_data_pipeline.cache import FORMAT_VERSION, load_typed
 from rideshare_data_pipeline.cli import CACHE_ENV, main
 from rideshare_data_pipeline.io import CastError, InputError
+from rideshare_data_pipeline.parse import with_derived
 from rideshare_data_pipeline.schema import csv_schema
 
 WATCHED = ("extract_member_named", "inspect_csv", "read_typed", "file_sha256")
@@ -122,6 +124,7 @@ def test_layout_and_metadata(tmp_path: Path, archive: Path) -> None:
     assert sorted(p.name for p in cache.iterdir()) == [sha, "index.json"]
     assert sorted(p.name for p in (cache / sha).iterdir()) == [
         "data.parquet",
+        "derived.parquet",
         "meta.json",
     ]
     meta = json.loads((cache / sha / "meta.json").read_text())
@@ -141,6 +144,11 @@ def test_layout_and_metadata(tmp_path: Path, archive: Path) -> None:
     assert meta["csv"]["bom"] is False
     assert meta["csv"]["line_ending"] == "crlf"
     assert meta["rows"] == 3
+    assert meta["derived"] == {
+        "fingerprint": cache_module.derivation_fingerprint(),
+        "rows": 3,
+        "columns": list(cache_module.DERIVED_NAMES_STORED),
+    }
     assert "tool_version" in meta
     assert meta["created"].endswith("+00:00")
     typed = pl.read_parquet(cache / sha / "data.parquet")
@@ -443,3 +451,173 @@ def test_a_hit_reproduces_the_archive_provenance(tmp_path: Path, archive: Path) 
         hit["run"]["input_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
     )
     assert hit["run"]["input_size_bytes"] == archive.stat().st_size
+
+
+# --- the derived-columns cache ------------------------------------------------------
+
+
+@pytest.fixture
+def derivations(monkeypatch: pytest.MonkeyPatch) -> Counter[str]:
+    """Count how often the derived columns are really computed."""
+    counter: Counter[str] = Counter()
+
+    def wrapper(df: pl.DataFrame) -> pl.DataFrame:
+        if df.height:  # not the empty frame that only yields the expected schema
+            counter["with_derived"] += 1
+        return with_derived(df)
+
+    monkeypatch.setattr(cache_module, "with_derived", wrapper)
+    return counter
+
+
+def test_a_hit_reads_the_derived_columns_instead_of_computing_them(
+    tmp_path: Path, archive: Path, derivations: Counter[str]
+) -> None:
+    flag = ("--cache-dir", str(tmp_path / "c"))
+    run_cli(tmp_path, archive, "o0")
+    _, miss = run_cli(tmp_path, archive, "o1", *flag)
+    assert derivations["with_derived"] == 2  # uncached, then the miss
+    derivations.clear()
+
+    _, hit = run_cli(tmp_path, archive, "o2", *flag)
+
+    assert derivations["with_derived"] == 0
+    assert hit["run"]["cache"] == "hit"
+    assert comparable(hit) == comparable(miss)
+    for name in ("o1", "o2"):
+        assert_frame_equal(
+            pl.read_parquet(tmp_path / name / "Data.curated.parquet"),
+            pl.read_parquet(tmp_path / "o0" / "Data.curated.parquet"),
+        )
+
+
+def test_the_derived_frame_from_the_cache_equals_the_computed_one(
+    tmp_path: Path, synthetic_csv: Path
+) -> None:
+    cache = tmp_path / "c"
+    loaded = load_typed(synthetic_csv, cache)
+    computed = cache_module.derive(loaded)
+    stored = cache_module.derive(loaded, cache)  # computes, then stores
+    again = cache_module.derive(load_typed(synthetic_csv, cache), cache)  # reads
+    assert_frame_equal(stored, computed)
+    assert_frame_equal(again, computed)
+    assert again.schema == computed.schema
+
+
+def test_a_changed_derivation_fingerprint_recomputes_and_restores(
+    tmp_path: Path,
+    archive: Path,
+    derivations: Counter[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flag = ("--cache-dir", str(tmp_path / "c"))
+    run_cli(tmp_path, archive, "o1", *flag)
+    derivations.clear()
+    monkeypatch.setattr(cache_module, "derivation_fingerprint", lambda: "changed")
+
+    # The typed entry is still valid (a hit); only the derived columns are stale.
+    _, stale = run_cli(tmp_path, archive, "o2", *flag)
+    assert (stale["run"]["cache"], derivations["with_derived"]) == ("hit", 1)
+    _, fresh = run_cli(tmp_path, archive, "o3", *flag)
+    assert (fresh["run"]["cache"], derivations["with_derived"]) == ("hit", 1)
+    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    meta = json.loads((tmp_path / "c" / sha / "meta.json").read_text())
+    assert meta["derived"]["fingerprint"] == "changed"
+    assert comparable(stale) == comparable(fresh)
+
+
+def test_an_entry_without_derived_columns_gets_them_on_the_next_run(
+    tmp_path: Path, archive: Path, derivations: Counter[str]
+) -> None:
+    flag = ("--cache-dir", str(tmp_path / "c"))
+    run_cli(tmp_path, archive, "o1", *flag)
+    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    entry = tmp_path / "c" / sha
+    (entry / "derived.parquet").unlink()
+    meta = json.loads((entry / "meta.json").read_text())
+    del meta["derived"]
+    (entry / "meta.json").write_text(json.dumps(meta))
+    derivations.clear()
+    assert run_cli(tmp_path, archive, "o2", *flag)[1]["run"]["cache"] == "hit"
+    assert derivations["with_derived"] == 1
+    assert (entry / "derived.parquet").is_file()
+    run_cli(tmp_path, archive, "o3", *flag)
+    assert derivations["with_derived"] == 1
+
+
+@pytest.mark.parametrize("damage", ["rows", "columns", "garbage"])
+def test_a_damaged_derived_file_is_recomputed_with_a_warning(
+    tmp_path: Path,
+    archive: Path,
+    derivations: Counter[str],
+    capsys: pytest.CaptureFixture[str],
+    damage: str,
+) -> None:
+    flag = ("--cache-dir", str(tmp_path / "c"))
+    _, first = run_cli(tmp_path, archive, "o1", *flag)
+    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    path = tmp_path / "c" / sha / "derived.parquet"
+    frame = pl.read_parquet(path)
+    if damage == "rows":
+        frame.head(1).write_parquet(path)
+    elif damage == "columns":
+        frame.drop("receipt_kind").write_parquet(path)
+    else:
+        path.write_bytes(b"not parquet")
+    derivations.clear()
+    capsys.readouterr()
+
+    code, report = run_cli(tmp_path, archive, "o2", *flag)
+
+    assert code == 0
+    assert derivations["with_derived"] == 1
+    assert "warning" in capsys.readouterr().err
+    assert comparable(report) == comparable(first)
+    derivations.clear()
+    run_cli(tmp_path, archive, "o3", *flag)
+    assert derivations["with_derived"] == 0  # rewritten, valid again
+
+
+def test_derivation_fingerprint_covers_the_derivation_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = cache_module.derivation_fingerprint()
+    assert cache_module.derivation_fingerprint() == base
+    # A different module set (or any edit to a module's text) is a different hash.
+    monkeypatch.setattr(
+        cache_module, "DERIVATION_MODULES", (*cache_module.DERIVATION_MODULES, "money")
+    )
+    assert cache_module.derivation_fingerprint() != base
+    monkeypatch.undo()
+    monkeypatch.setattr(cache_module, "__version__", "other")
+    assert cache_module.derivation_fingerprint() != base
+
+
+def test_derivation_modules_include_every_package_module_they_import() -> None:
+    """If parse.py starts importing another module of this package, that module's
+    source must be hashed too, or an edit to it would serve stale derived columns."""
+    package = Path(cache_module.__file__).parent
+    pending = list(cache_module.DERIVATION_MODULES)
+    seen: set[str] = set()
+    while pending:
+        module = pending.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        tree = ast.parse((package / f"{module}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                parts = node.module.split(".")
+                if parts[0] == "rideshare_data_pipeline":
+                    # "from rideshare_data_pipeline import x" names modules in the
+                    # alias list, "from rideshare_data_pipeline.x import y" in the path.
+                    pending.extend(
+                        [n.name for n in node.names] if len(parts) == 1 else [parts[1]]
+                    )
+            elif isinstance(node, ast.Import):
+                pending.extend(
+                    a.name.split(".")[1]
+                    for a in node.names
+                    if a.name.startswith("rideshare_data_pipeline.")
+                )
+    assert seen <= set(cache_module.DERIVATION_MODULES), seen

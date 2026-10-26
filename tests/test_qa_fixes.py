@@ -168,7 +168,7 @@ def test_an_unexpected_exception_exits_3_with_one_line(
         msg = "something broke\nsecond line stays out"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(cli_module, "supersede_flags", boom)
+    monkeypatch.setattr(cli_module, "derive", boom)
     assert run_cli(synthetic_csv, tmp_path / "out") == EXIT_INTERNAL_ERROR == 3
     captured = capsys.readouterr()
     assert captured.out == ""

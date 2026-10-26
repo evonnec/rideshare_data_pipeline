@@ -13,7 +13,7 @@ from pathlib import Path
 # None of these import polars at import time (they use PEP 810 lazy imports), so
 # `rideshare-qc --help` and argument errors return without loading it.
 from rideshare_data_pipeline import __version__
-from rideshare_data_pipeline.cache import CacheStatus, load_typed
+from rideshare_data_pipeline.cache import CacheStatus, derive, load_typed
 from rideshare_data_pipeline.checks import (
     default_dataset_checks,
     default_rules,
@@ -39,13 +39,11 @@ from rideshare_data_pipeline.curated import (
     row_flags,
     write_curated,
 )
-from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.io import (
     FileFacts,
     InputError,
     input_stem,
 )
-from rideshare_data_pipeline.parse import with_derived
 from rideshare_data_pipeline.report import (
     MemberInfo,
     RunInfo,
@@ -247,7 +245,7 @@ def run(
     # The derived columns (receipt kind, profile, rider-spend flag) are computed
     # once, then the dedupe flag; the checks read them and the curated Parquet
     # keeps them.
-    lf = supersede_flags(with_derived(df)).lazy()
+    lf = derive(loaded, cache_dir).lazy()
     rules = configure_rules(default_rules(config.check_params()), config)
     # One instance of the dataset checks: the outlier pair caches its scores in it,
     # and the row flags below reuse them. A disabled check is not run at all.
