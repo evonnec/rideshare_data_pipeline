@@ -9,7 +9,8 @@ min_rows = 1          # row_count_band: fewest rows expected (0 = no lower bound
                       # header-only file fails with the default of 1
 # max_rows = 5000000  # row_count_band: most rows expected (default: no upper bound)
 
-# At least one check must stay enabled (a config that turns every check off is an error).
+# At least one check besides cast_failures (which can't be disabled) must stay
+# enabled: a config that turns every other check off is an error.
 # Per check: max_failed_rate (the check passes while failed / evaluated is at most
 # this), severity ("error", "warn" or "info") and enabled (false removes the check).
 # A check with numbers of its own also takes a [checks.<name>.params] table; an

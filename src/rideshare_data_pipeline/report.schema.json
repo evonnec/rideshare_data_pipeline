@@ -42,7 +42,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["start", "end"],
-          "description": "Earliest and latest email_time, ISO 8601; null for a file with no rows.",
+          "description": "Earliest and latest email_time as naive ISO 8601 timestamps: no UTC offset is written, although email_time is assumed to be UTC. Null for a file with no rows.",
           "properties": {
             "start": { "type": ["string", "null"] },
             "end": { "type": ["string", "null"] }

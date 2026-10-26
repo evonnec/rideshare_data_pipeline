@@ -34,9 +34,12 @@ it amends (see ``dedupe.py``), so the population holds the ride's total once, as
 its final version, never the ride plus the tip.
 """
 
+import math
 from collections.abc import Mapping
 
 lazy import polars as pl
+
+from rideshare_data_pipeline.io import TotalOverflowError
 
 type Waterfall = dict[str, dict[str, float | int]]
 """``{step: {"rows": n, "amount": total}}``; see ``spend_waterfall``."""
@@ -115,6 +118,17 @@ def waterfall_exprs() -> list[pl.Expr]:
     ]
 
 
+_STEP_LABELS = {
+    "naive": "naive total",
+    "suspect": "currency-suspect total",
+    "non_spend": "non-rider-spend total",
+    "micro": "micromobility total",
+    "superseded": "superseded total",
+    "clean": "clean USD rider spend",
+    "suspect_spend": "suspect rider-spend total",
+}
+
+
 def spend_waterfall(row: Mapping[str, float | int]) -> Waterfall:
     """The waterfall from the one-row result of ``waterfall_exprs``.
 
@@ -128,10 +142,12 @@ def spend_waterfall(row: Mapping[str, float | int]) -> Waterfall:
     """
 
     def cell(name: str) -> dict[str, float | int]:
-        return {
-            "rows": int(row[f"{name}_rows"]),
-            "amount": round(float(row[f"{name}_amount"] or 0.0), 2),
-        }
+        amount = float(row[f"{name}_amount"] or 0.0)
+        if not math.isfinite(amount):
+            # The inputs were all finite (a non-finite cell fails its cast), so
+            # the sum overflowed: an input error, not a number for the report.
+            raise TotalOverflowError(_STEP_LABELS[name], AMOUNT)
+        return {"rows": int(row[f"{name}_rows"]), "amount": round(amount, 2)}
 
     return {
         "naive_total": cell("naive"),

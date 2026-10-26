@@ -22,6 +22,12 @@ Columns, in order:
 7. ``qc_flags``: the names of the checks the row fails, ``list[str]``, empty (never
    null) on a clean row.
 
+Flags are per row; pass or fail is per rate. A ``qc_<check>`` flag means this row
+breaks the rule, whatever the check's ``max_failed_rate``. A check passes when its
+failure RATE is within the threshold, so with a loosened threshold a check can PASS
+while its flag is still True on the failing rows, and ``qc_error``/``qc_warn``
+(which follow the flags, not the verdicts) are still True on them.
+
 The flags are evaluated once into a narrow frame (``flag_table``; the temporary
 ``POSITION`` column exists only there and never reaches the file), attached to the
 typed frame in one lazy ``with_columns`` and written with ``sink_parquet``. The typed

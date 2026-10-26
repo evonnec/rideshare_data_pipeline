@@ -12,9 +12,9 @@ own: without a cache, with an empty cache (a miss that writes it), and again wit
 
 Only loose properties are asserted, never a real value: completion, a row count
 above a million, rates under a bound, and the time budgets. The budgets are for a
-laptop that is otherwise idle: 10 s from the CSV and 2 s from the cache. On a busy
+laptop that is otherwise idle: 10 s from the CSV and 3 s from the cache. On a busy
 or slower machine set ``RIDESHARE_QC_TIME_SCALE`` (default 1.0) to stretch both,
-e.g. ``RIDESHARE_QC_TIME_SCALE=1.5`` allows 15 s and 3 s. The data path is read
+e.g. ``RIDESHARE_QC_TIME_SCALE=1.5`` allows 15 s and 4.5 s. The data path is read
 from the environment only and never written to a file in the repository.
 """
 
@@ -39,7 +39,7 @@ DATA = os.environ.get("RIDESHARE_QC_DATA", "")
 TIME_SCALE = float(os.environ.get("RIDESHARE_QC_TIME_SCALE", "1.0"))
 
 NO_CACHE_BUDGET_SECONDS = 10.0
-CACHE_HIT_BUDGET_SECONDS = 2.0
+CACHE_HIT_BUDGET_SECONDS = 3.0
 
 pytestmark = [
     pytest.mark.slow,

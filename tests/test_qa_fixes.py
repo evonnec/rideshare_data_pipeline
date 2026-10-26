@@ -457,7 +457,7 @@ def test_a_config_with_every_check_disabled_is_an_error(tmp_path: Path) -> None:
     text = "".join(f"[checks.{n}]\nenabled = false\n" for n in KNOWN_CHECKS)
     path = tmp_path / "off.toml"
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="every check is disabled"):
+    with pytest.raises(ConfigError, match="every check but cast_failures is disabled"):
         load_config(path)
 
 
@@ -473,11 +473,13 @@ def test_all_checks_disabled_exits_2(
     )
     out = tmp_path / "out"
     assert run_cli(synthetic_csv, out, "--config", str(config)) == EXIT_INPUT_ERROR
-    assert "every check is disabled" in capsys.readouterr().err
+    assert "every check but cast_failures is disabled" in capsys.readouterr().err
     assert not out.exists()
 
 
-def test_every_other_check_may_be_disabled(synthetic_csv: Path, tmp_path: Path) -> None:
+def test_cast_failures_alone_is_not_a_config_with_a_check_enabled(
+    synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     from rideshare_data_pipeline.config import KNOWN_CHECKS
 
     config = tmp_path / "one.toml"
@@ -490,9 +492,29 @@ def test_every_other_check_may_be_disabled(synthetic_csv: Path, tmp_path: Path) 
         encoding="utf-8",
     )
     out = tmp_path / "out"
+    assert run_cli(synthetic_csv, out, "--config", str(config)) == EXIT_INPUT_ERROR
+    assert "every check but cast_failures is disabled" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_one_check_besides_cast_failures_is_enough(
+    synthetic_csv: Path, tmp_path: Path
+) -> None:
+    from rideshare_data_pipeline.config import KNOWN_CHECKS
+
+    config = tmp_path / "two.toml"
+    config.write_text(
+        "".join(
+            f"[checks.{n}]\nenabled = false\n"
+            for n in KNOWN_CHECKS
+            if n not in {"cast_failures", "row_count_band"}
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
     assert run_cli(synthetic_csv, out, "--config", str(config)) == EXIT_OK
     names = [c["name"] for c in report(out)["checks"]]  # type: ignore[attr-defined]
-    assert names == ["cast_failures"]
+    assert names == ["cast_failures", "row_count_band"]
 
 
 # --- micromobility line and the spend report -------------------------------------
