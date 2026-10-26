@@ -95,6 +95,11 @@ class RowRule:
 
     sample_cols: tuple[str, ...] = KEY_COLS
 
+    breakdown: Mapping[str, Expr] = field(default_factory=dict)
+    """Optional per-field failure predicates (True means failed), counted in the
+    same scan as the rule and reported as ``details["by_field"]`` (``{field: n}``,
+    among the rows the rule applies to). Not part of the verdict."""
+
 
 type DatasetCheck = Callable[[pl.LazyFrame], CheckResult]
 """A check on the dataset as a whole: LazyFrame in, CheckResult out."""

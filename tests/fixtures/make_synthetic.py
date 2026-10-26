@@ -76,7 +76,13 @@ SEED = 20190301
 # passing however the injections change.
 MANIFEST: dict[str, int] = {
     # --- implemented now (asserted in tests/test_synthetic.py) -----------------
+    "S1": 0,  # the header is the 33 expected columns, in order
     "S2": 0,  # no value fails its cast
+    "S3": 0,  # valid UTF-8
+    # Negative control: every ride has a total, an order number and an order time,
+    # so the null rates are 0 unless an injection removes one.
+    "C2": 0,
+    "C3": 0,  # row_count_band: the default band (at least 1 row) holds
     "U2b": 0,  # after the dedupe no key repeats among the kept rows
     # A1 applies to rider-spend receipts only: the bike's -4.50 (a non-spend kind) is
     # not counted. The injected negative car ride is, and it is the only A1 failure.
@@ -144,7 +150,7 @@ MANIFEST: dict[str, int] = {
     "PC1": 0,
     "PR1": 2,  # masked_subjects
     # More negative controls: the baseline and injections must not trip these.
-    "C1": 0,  # required columns are always present
+    "C1": 0,  # required columns are always present (asserted in test_synthetic)
     "V1": 0,  # merchant and sender domain agree in every row
     "A2": 0,  # item_price == order_subtotal in every row
     "A6": 0,  # no unexplained residual above max(20, subtotal)

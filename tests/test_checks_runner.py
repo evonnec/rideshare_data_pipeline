@@ -170,13 +170,15 @@ def test_registry_rules() -> None:
     assert rules["checksum_unique"].check_id == "U1"
     assert rules["category_mismatch"].check_id == "V2"
     assert {n: r.severity for n, r in rules.items()} == {
+        "required_fields": Severity.ERROR,
+        "id_formats": Severity.WARN,
         "non_negative_total": Severity.ERROR,
         "checksum_unique": Severity.ERROR,
         "category_mismatch": Severity.WARN,
         "merchant_sender_consistent": Severity.ERROR,
         "unknown_sender": Severity.WARN,
     }
-    assert len(default_dataset_checks()) == 11
+    assert len(default_dataset_checks()) == 12
 
 
 def test_registered_rules_on_synthetic_data(tmp_path: Path) -> None:

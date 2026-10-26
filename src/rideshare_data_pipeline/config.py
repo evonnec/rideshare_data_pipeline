@@ -1,9 +1,11 @@
 """QC configuration: defaults in code, optional TOML overrides.
 
-The TOML file has two top-level keys and one table per check::
+The TOML file has four top-level keys and one table per check::
 
     sample_limit = 20  # failing rows kept per check
     fail_on = "error"  # "error" or "warn": what makes the run exit 1
+    min_rows = 1  # row_count_band: fewest rows expected (0: no lower bound)
+    # max_rows = 5_000_000  # row_count_band: most rows expected (default: no limit)
 
     [checks.non_negative_total]
     max_failed_rate = 0.01  # the check passes while failed / evaluated <= this
@@ -33,7 +35,12 @@ from rideshare_data_pipeline.io import InputError, StrPath
 # Every check a run can report, in report order: the registered row rules, then
 # the dataset checks. A test keeps this in step with the registry.
 KNOWN_CHECKS: tuple[str, ...] = (
+    "header_valid",
+    "utf8_valid",
     "cast_failures",
+    "row_count_band",
+    "required_fields",
+    "id_formats",
     "non_negative_total",
     "checksum_unique",
     "category_mismatch",
@@ -42,6 +49,7 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "all_null_columns",
     "constant_columns",
     "duplicate_rows",
+    "ride_completeness",
     "receipt_kinds",
     "unclassified_subject_templates",
     "duplicate_receipts",
@@ -54,7 +62,7 @@ KNOWN_CHECKS: tuple[str, ...] = (
 
 # `fail_on` can only be a gating severity: info checks never gate.
 _FAIL_ON = (Severity.ERROR, Severity.WARN)
-_TOP_KEYS = frozenset({"sample_limit", "fail_on", "checks"})
+_TOP_KEYS = frozenset({"sample_limit", "fail_on", "min_rows", "max_rows", "checks"})
 _CHECK_KEYS = frozenset({"max_failed_rate", "severity", "enabled"})
 
 
@@ -77,6 +85,13 @@ class QCConfig:
 
     sample_limit: int = SAMPLE_LIMIT
     fail_on: Severity = Severity.ERROR
+    min_rows: int = 1
+    """The fewest rows the input should have; 0 turns the lower bound off. The
+    default of 1 makes a header-only file fail row_count_band."""
+
+    max_rows: int | None = None
+    """The most rows the input should have; None means no upper bound."""
+
     checks: Mapping[str, CheckOverride] = field(default_factory=dict)
 
     def override(self, name: str) -> CheckOverride:
@@ -133,6 +148,17 @@ def _override(name: str, table: object) -> CheckOverride:
     )
 
 
+def _row_bound(data: Mapping[str, object], key: str) -> int | None:
+    """A row-count bound: a non-negative integer, or None when the key is absent."""
+    value = data.get(key)
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+    ):
+        msg = f"{key}: expected a non-negative integer, got {value!r}"
+        raise ConfigError(msg)
+    return value
+
+
 def parse_config(data: Mapping[str, object]) -> QCConfig:
     """Build a QCConfig from parsed TOML, rejecting unknown keys and bad values."""
     _unknown(data, _TOP_KEYS, "config")
@@ -142,6 +168,12 @@ def parse_config(data: Mapping[str, object]) -> QCConfig:
         msg = f"sample_limit: expected a non-negative integer, got {limit!r}"
         raise ConfigError(msg)
     fail_on = _severity(data.get("fail_on", defaults.fail_on), "fail_on", _FAIL_ON)
+    low = _row_bound(data, "min_rows")
+    min_rows = defaults.min_rows if low is None else low
+    max_rows = _row_bound(data, "max_rows")
+    if max_rows is not None and min_rows > max_rows:
+        msg = f"min_rows ({min_rows}) is greater than max_rows ({max_rows})"
+        raise ConfigError(msg)
     tables = data.get("checks", {})
     if not isinstance(tables, dict):
         msg = "checks: expected a table of [checks.<name>] tables"
@@ -150,6 +182,8 @@ def parse_config(data: Mapping[str, object]) -> QCConfig:
     return QCConfig(
         sample_limit=limit,
         fail_on=fail_on,
+        min_rows=min_rows,
+        max_rows=max_rows,
         checks={name: _override(name, table) for name, table in tables.items()},
     )
 

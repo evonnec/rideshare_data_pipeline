@@ -5,13 +5,40 @@
 sample_limit = 20     # failing rows kept per check (samples/<check>.parquet)
 fail_on = "error"     # "error" or "warn": the lowest severity whose failure exits 1
                       # (the --fail-on flag overrides this)
+min_rows = 1          # row_count_band: fewest rows expected (0 = no lower bound); a
+                      # header-only file fails with the default of 1
+# max_rows = 5000000  # row_count_band: most rows expected (default: no upper bound)
 
 # Per check: max_failed_rate (the check passes while failed / evaluated is at most
 # this), severity ("error", "warn" or "info") and enabled (false removes the check).
 
+[checks.header_valid]        # S1: the 33 expected columns, in order (a bad header exits 2 before this)
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.utf8_valid]          # S3: valid UTF-8; BOM and line endings recorded (bad bytes exit 2)
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
 [checks.cast_failures]       # S2: columns with values that don't convert to their type
 max_failed_rate = 0.0
 severity = "error"
+enabled = true
+
+[checks.row_count_band]      # the row count is within min_rows..max_rows (metric: the count itself)
+severity = "warn"
+enabled = true
+
+[checks.required_fields]     # C1: merchant_name, user_id, email_time, checksum, from_domain, email_subject
+max_failed_rate = 0.0        # are never null
+severity = "error"
+enabled = true
+
+[checks.id_formats]          # S6: user_id 64 hex, checksum 32 hex, Lyft order 18-19 digits, Uber order UUID
+max_failed_rate = 0.0
+severity = "warn"
 enabled = true
 
 [checks.non_negative_total]  # A1: order_total_amount >= 0 (rider-spend receipts only)
@@ -50,6 +77,10 @@ enabled = true
 [checks.duplicate_rows]      # U0: exact duplicate rows
 max_failed_rate = 0.0
 severity = "error"
+enabled = true
+
+[checks.ride_completeness]   # C2: rides' null rates: total <= 0.01%, order_number <= 0.5%, order_time <= 0.5%
+severity = "warn"            # (per-field limits are fixed; max_failed_rate would replace the worst field's)
 enabled = true
 
 [checks.receipt_kinds]       # K1: receipt kind composition (info, no threshold)

@@ -156,7 +156,12 @@ def test_csv_end_to_end(
     stdout = capsys.readouterr().out
     check_lines = stdout.split("\n\n")[1].splitlines()
     assert [line.split()[2] for line in check_lines] == [
+        "header_valid",
+        "utf8_valid",
         "cast_failures",
+        "row_count_band",
+        "required_fields",
+        "id_formats",
         "non_negative_total",
         "checksum_unique",
         "category_mismatch",
@@ -165,6 +170,7 @@ def test_csv_end_to_end(
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
+        "ride_completeness",
         "receipt_kinds",
         "unclassified_subject_templates",
         "duplicate_receipts",
@@ -243,6 +249,25 @@ def test_header_only_csv_writes_an_empty_parquet(
     assert found["all-null columns"] == "0"
     assert found["constant columns"] == "0"
     assert pl.read_parquet(tmp_path / "out" / "header.parquet").height == 0
+
+
+def test_header_only_csv_fails_the_row_count_band_unless_min_rows_is_0(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write_csv_text(tmp_path / "header.csv", [])
+    argv = ["run", "--input", str(path), "--out", str(tmp_path / "out")]
+    assert main(argv) == 0  # a warn failure doesn't gate by default
+    line = next(
+        ln for ln in capsys.readouterr().out.splitlines() if "row_count_band" in ln
+    )
+    assert line.split()[:3] == ["warn", "FAIL", "row_count_band"]
+    assert line.split()[-2:] == ["0", "rows"]
+
+    config = tmp_path / "qc.toml"
+    config.write_text("min_rows = 0\n", encoding="utf-8")
+    assert main([*argv, "--config", str(config)]) == 0
+    assert "warn   PASS  row_count_band" in capsys.readouterr().out
+    assert main([*argv, "--fail-on", "warn"]) == 1
 
 
 # --- duplicates: exit 1, rows kept -------------------------------------------------
