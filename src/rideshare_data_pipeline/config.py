@@ -37,8 +37,10 @@ from rideshare_data_pipeline.checks import outliers, plausibility
 from rideshare_data_pipeline.checks.model import (
     SAMPLE_LIMIT,
     CheckResult,
+    DatasetCheck,
     RowRule,
     Severity,
+    check_name,
 )
 from rideshare_data_pipeline.io import InputError, StrPath
 
@@ -297,6 +299,21 @@ def configure_rules(rules: Iterable[RowRule], config: QCConfig) -> list[RowRule]
         severity = rule.severity if o.severity is None else o.severity
         out.append(dataclasses.replace(rule, max_failed_rate=rate, severity=severity))
     return out
+
+
+def configure_dataset_checks(
+    checks: Iterable[DatasetCheck], config: QCConfig
+) -> list[DatasetCheck]:
+    """Drop the dataset checks the config disables, before they are computed.
+
+    A check that doesn't say its name (a bare function; see ``check_name``) is kept,
+    and configure_results drops its result afterwards, as it always does.
+    """
+    return [
+        c
+        for c in checks
+        if (name := check_name(c)) is None or config.override(name).enabled
+    ]
 
 
 def configure_results(

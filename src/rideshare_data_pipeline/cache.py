@@ -25,6 +25,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
 lazy import hashlib
@@ -33,6 +34,8 @@ lazy import polars as pl
 
 from rideshare_data_pipeline import __version__
 from rideshare_data_pipeline import io as rio
+from rideshare_data_pipeline.dedupe import FLAG_NAMES, supersede_flags
+from rideshare_data_pipeline.parse import DERIVED_NAMES, with_derived
 from rideshare_data_pipeline.schema import (
     DATE_FORMAT,
     EXPECTED_COLUMNS,
@@ -45,6 +48,7 @@ FORMAT_VERSION = 3
 """Bump when the layout of an entry or of index.json changes."""
 
 DATA_FILE = "data.parquet"
+DERIVED_FILE = "derived.parquet"
 META_FILE = "meta.json"
 INDEX_FILE = "index.json"
 
@@ -90,6 +94,35 @@ def schema_fingerprint() -> str:
         "date_format": DATE_FORMAT,
     }
     return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+
+
+DERIVATION_MODULES: tuple[str, ...] = ("parse", "sender", "dedupe")
+"""The modules (files of this package) whose code decides the derived columns and the
+dedupe flags: ``with_derived`` and ``supersede_flags`` live in the first and last,
+the sender rules in ``sender``. A test checks that nothing else of this package is
+imported by them."""
+
+DERIVED_NAMES_STORED: tuple[str, ...] = (*DERIVED_NAMES, *FLAG_NAMES)
+
+
+def derivation_fingerprint() -> str:
+    """Hash what decides the derived and dedupe-flag columns, for the derived cache.
+
+    The tool version, the polars version (a regex or cast could change under the
+    same code) and the exact source text of DERIVATION_MODULES. The source hash is
+    the point: editing the derivation logic changes the fingerprint on its own,
+    with no constant to remember to bump, so a stale derived column can't be served;
+    the versions only add more invalidation (a release or a polars upgrade
+    rebuilds the derived columns, which costs a second on the sample).
+    """
+    digest = hashlib.sha256()
+    digest.update(f"tool={__version__}\0polars={pl.__version__}\0".encode())
+    package = files("rideshare_data_pipeline")
+    for module in DERIVATION_MODULES:
+        digest.update(f"{module}\0".encode())
+        digest.update(package.joinpath(f"{module}.py").read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _warn(message: str) -> None:
@@ -318,3 +351,84 @@ def load_typed(
     except (OSError, pl.exceptions.PolarsError) as err:
         _warn(f"cache not written to {cache}: {err}")
     return loaded
+
+
+def _derived_schema() -> pl.Schema:
+    """The dtypes of the stored derived columns, from deriving an empty typed frame."""
+    empty = pl.DataFrame(schema=csv_schema())
+    return supersede_flags(with_derived(empty)).select(DERIVED_NAMES_STORED).schema
+
+
+def _try_load_derived(entry: Path, rows: int) -> Frame | None:
+    """The stored derived columns of this entry, or None unless they are current.
+
+    Current means the entry's meta records the present derivation_fingerprint(),
+    and the Parquet has this frame's row count and exactly the expected columns and
+    dtypes. A file that exists but can't be read back is a miss with a warning.
+    """
+    try:
+        meta = json.loads((entry / META_FILE).read_text(encoding="utf-8"))
+        stored = meta.get("derived")
+        if (
+            not isinstance(stored, dict)
+            or stored.get("fingerprint") != derivation_fingerprint()
+            or stored.get("rows") != rows
+            or not (entry / DERIVED_FILE).is_file()
+        ):
+            return None
+        frame = pl.read_parquet(entry / DERIVED_FILE)
+        if frame.height != rows or frame.schema != _derived_schema():
+            msg = "the derived Parquet doesn't match the expected schema or row count"
+            raise ValueError(msg)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError, pl.exceptions.PolarsError) as err:
+        _warn(f"recomputing unreadable derived columns in {entry}: {err}")
+        return None
+    return frame
+
+
+def _store_derived(entry: Path, frame: Frame) -> None:
+    """Add the derived columns to an existing entry: the Parquet, then its meta record.
+
+    The Parquet is renamed into place first and the meta (which carries the
+    fingerprint a reader checks) second, each atomically, so a reader that sees
+    the new meta always finds the matching Parquet.
+    """
+    meta_path = entry / META_FILE
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rio.write_parquet(frame.select(DERIVED_NAMES_STORED), entry / DERIVED_FILE)
+    meta["derived"] = {
+        "fingerprint": derivation_fingerprint(),
+        "rows": frame.height,
+        "columns": list(DERIVED_NAMES_STORED),
+    }
+    _write_json(meta_path, meta)
+
+
+def derive(loaded: Loaded, cache_dir: rio.StrPath | None = None) -> Frame:
+    """The typed frame with the derived and dedupe-flag columns added.
+
+    Deriving costs about 1.2 s on the 1.9M-row sample (the subject and description
+    regexes, the dedupe sort). With a cache directory the derived columns are kept in
+    the entry of this input (``derived.parquet``) and read back on later runs,
+    only while the entry's recorded derivation_fingerprint() matches this code's
+    (see there); otherwise they are recomputed and stored again. Without a cache,
+    or when the entry can't be written, this is just the computation.
+    """
+    entry = (
+        None
+        if cache_dir is None or loaded.cache == "off"
+        else Path(cache_dir) / loaded.input_sha256
+    )
+    if entry is not None:
+        columns = _try_load_derived(entry, loaded.df.height)
+        if columns is not None:
+            return loaded.df.hstack(columns.get_columns())
+    frame = supersede_flags(with_derived(loaded.df))
+    if entry is not None and (entry / META_FILE).is_file():
+        try:
+            _store_derived(entry, frame)
+        except (OSError, ValueError, pl.exceptions.PolarsError) as err:
+            _warn(f"derived columns not cached in {entry}: {err}")
+    return frame

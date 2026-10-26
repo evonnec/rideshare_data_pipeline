@@ -22,6 +22,7 @@ from rideshare_data_pipeline.checks.model import (
     CheckResult,
     DatasetCheck,
     FlaggedCheck,
+    NamedCheck,
     RowRule,
     Severity,
     rows_at,
@@ -68,6 +69,30 @@ class DegenerateColumns(NamedTuple):
     """The column's non-null values are all equal (and at least one is present)."""
 
 
+def _is_constant(column: str, dtype: pl.DataType) -> pl.Expr:
+    """True when the column's non-null values are all equal and at least one exists.
+
+    For a type with a total order (numbers, text, booleans, dates and times) the
+    non-null values are all equal exactly when their minimum equals their maximum,
+    which is a plain scan; counting distinct values hashes every value and costs
+    about four times as much on the 1.9M-row sample. Other types (nested ones)
+    keep the distinct count.
+    """
+    col = pl.col(column)
+    if dtype.is_numeric() or dtype.is_temporal() or dtype in (pl.String, pl.Boolean):
+        low = col.min()
+        # A column with no non-null value has a null minimum: not constant.
+        same = ((low == col.max()) & low.is_not_null()).fill_null(False)
+        if dtype.is_float():
+            # min and max skip NaN, so a column that holds one is judged by its
+            # values: constant only if every non-null value is NaN (all NaN count as
+            # one value).
+            nans = col.is_nan().sum()
+            return pl.when(nans > 0).then(col.count() == nans).otherwise(same)
+        return same
+    return col.drop_nulls().n_unique() == 1
+
+
 def degenerate_columns(lf: pl.LazyFrame) -> DegenerateColumns:
     """Find the all-null and the constant columns, in one lazy select.
 
@@ -80,14 +105,15 @@ def degenerate_columns(lf: pl.LazyFrame) -> DegenerateColumns:
     neither, because there are no values to judge; a row-count check is the place
     to flag it.
     """
-    names = lf.collect_schema().names()
+    schema = lf.collect_schema()
+    names = schema.names()
     if not names:
         return DegenerateColumns(all_null=[], constant=[])
     flags = (
         lf.select(
             pl.struct(
                 all_null=(pl.len() > 0) & (pl.col(c).null_count() == pl.len()),
-                constant=pl.col(c).drop_nulls().n_unique() == 1,
+                constant=_is_constant(c, schema[c]),
             ).alias(c)
             for c in names
         )
@@ -110,6 +136,10 @@ def constant_columns(lf: pl.LazyFrame) -> list[str]:
     return degenerate_columns(lf).constant
 
 
+_PROBE_COLUMNS = ("checksum", "user_id", "email_time")
+"""The columns whose repeats select the candidate duplicate rows."""
+
+
 def duplicate_row_positions(lf: pl.LazyFrame) -> pl.Series:
     """The positions (``POSITION``) of the rows that exactly repeat an earlier row.
 
@@ -121,12 +151,16 @@ def duplicate_row_positions(lf: pl.LazyFrame) -> pl.Series:
     if not columns:
         return pl.Series(POSITION, [], dtype=pl.UInt32)
     key = pl.struct(columns)
-    # Identical rows hash alike, so only rows whose 64-bit row hash repeats can be
-    # duplicates; comparing just those exactly avoids building a full-width key
-    # for every row (and a hash collision can't produce a false count).
+    # Identical rows are identical in every column, so a row can only be a
+    # duplicate if its values in any few columns repeat: hashing three
+    # high-cardinality columns finds every candidate for a quarter of the cost of
+    # hashing all 33. The candidates are then compared exactly on every column, so
+    # neither the choice of columns nor a hash collision can change the count (a
+    # frame without those columns falls back to all of them).
+    probe = [c for c in _PROBE_COLUMNS if c in columns] or columns
     candidates = (
         lf.with_row_index(POSITION)
-        .filter(key.hash().is_duplicated())
+        .filter(pl.struct(probe).hash().is_duplicated())
         .collect(engine="streaming")
     )
     return candidates.filter(~key.is_first_distinct())[POSITION]
@@ -470,8 +504,8 @@ def dataset_checks() -> tuple[DatasetCheck, ...]:
     """
     all_null, constant = column_profile_checks()
     return (
-        all_null,
-        constant,
+        NamedCheck("all_null_columns", all_null),
+        NamedCheck("constant_columns", constant),
         duplicate_rows(),
-        ride_completeness_check,
+        NamedCheck("ride_completeness", ride_completeness_check),
     )

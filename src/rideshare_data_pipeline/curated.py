@@ -94,8 +94,13 @@ def row_flags(
     rules: Iterable[RowRule],
     dataset_checks: Iterable[DatasetCheck],
     results: Sequence[CheckResult],
+    evaluated: pl.DataFrame | None = None,
 ) -> list[RowFlag]:
     """The flags of the checks that ran, in report order.
+
+    `evaluated` is ``evaluate_rules(lf, rules)`` for these `rules`, if the caller
+    has it: a rule's flag is then its ``failed_i`` column, already computed, instead
+    of its predicate evaluated over the data again.
 
     `rules` and `dataset_checks` are the ones that were run (the same objects, and
     `lf` the same frame the checks ran on: a flagged check may reuse work it cached
@@ -105,9 +110,11 @@ def row_flags(
     """
     severity = {r.name: r.severity for r in results}
     found: dict[str, Expr] = {}
-    for rule in rules:
+    for i, rule in enumerate(rules):
         if rule.name in severity:
-            found[rule.name] = fails(rule)
+            found[rule.name] = (
+                fails(rule) if evaluated is None else pl.lit(evaluated[f"failed_{i}"])
+            )
     for check in dataset_checks:
         if isinstance(check, FlaggedCheck) and check.name in severity:
             found[check.name] = check.row_flag(lf)

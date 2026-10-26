@@ -11,6 +11,7 @@ from rideshare_data_pipeline.checks.model import (
     KEY_COLS,
     CheckResult,
     DatasetCheck,
+    NamedCheck,
     RowRule,
     Severity,
 )
@@ -144,4 +145,7 @@ def unclassified_templates_check(lf: pl.LazyFrame) -> CheckResult:
 
 def dataset_checks() -> tuple[DatasetCheck, ...]:
     """The kind checks that need the whole dataset, for the registry."""
-    return (receipt_kinds_check, unclassified_templates_check)
+    return (
+        NamedCheck("receipt_kinds", receipt_kinds_check),
+        NamedCheck("unclassified_subject_templates", unclassified_templates_check),
+    )

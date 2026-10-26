@@ -136,19 +136,51 @@ Decompressing the bz2 sample takes about 20 s per run. With a cache directory, t
 
 ```text
 <cache>/<sha256 of the input file as given>/data.parquet   the typed frame (zstd)
+<cache>/<sha256 of the input file as given>/derived.parquet  the derived and dedupe-flag columns only (zstd)
 <cache>/<sha256 of the input file as given>/meta.json      format version, tool version, schema fingerprint,
                                                            input name/size/mtime_ns/sha256, the CSV's member
                                                            name (null for a CSV input), size,
-                                                           sha256, BOM and line endings, row count, created
+                                                           sha256, BOM and line endings, row count, created,
+                                                           and the derived columns' fingerprint and row count
 <cache>/index.json                                         resolved path -> size, mtime_ns, sha256
 ```
 
 - **Validity**: an entry is used only if its format version and schema fingerprint match. The fingerprint hashes the 33 column names, the dtypes and the timestamp formats, so a change to the schema invalidates old entries and a release that leaves it alone does not (the tool version is recorded but is not part of the key). Anything else wrong with an entry (bad JSON, unreadable Parquet, a row count that disagrees) is a warning on stderr and a rebuild.
+- **Derived columns**: `derived.parquet` holds the columns `with_derived` and `supersede_flags` add (receipt kind, trip columns, currency flags, the dedupe flags). They cost about 1.2 s to compute, so a hit reads them back instead. Their key is a *derivation fingerprint*: a SHA-256 of the exact source text of `parse.py`, `sender.py` and `dedupe.py` (the modules that decide them) plus the tool version and the polars version. This is deliberately stricter than the typed frame's key: editing the derivation logic changes the fingerprint on its own, with no constant to remember to bump, so stale derived columns can never be served, and a release or a polars upgrade rebuilds them too (about a second). A test checks that the hashed modules cover everything those modules import from the package. When the fingerprint, the row count or the columns and dtypes don't match, or the file is unreadable, the typed entry is still used, the derived columns are recomputed and the file is rewritten (an unreadable one with a warning).
 - **Fast lookup**: the input is statted and looked up in `index.json`. If the path, size and mtime match and the entry is valid, the input is not read at all. Otherwise the input (the archive, or the CSV) is hashed, which still finds an entry for a touched or copied file with the same bytes; failing that the run takes the normal path (extract, validate, read, cast) and writes the entry. The trade-off: an in-place edit that keeps both the size and the mtime would be missed. That is very unlikely; use `--refresh-cache` to rebuild regardless.
 - **Only validated data is cached**: a run that fails with an input error (bad header, encoding or casts) writes no entry. Writes are atomic (a temporary directory, then a rename), so a crash or a concurrent run never leaves a half-written entry. A cache directory that can't be written is a warning; caching never fails a run.
 - **Same results**: the report is the same as an uncached run's apart from the timings and `run.cache` (`"hit"`, `"miss"` or `"off"`).
 - The same data given as a CSV and as an archive gives two entries (the key is the file as given).
 - The cache holds real data, not a derived summary: keep it outside the repository and delete it when you are done.
+
+## Performance
+
+Measured on the 866 MB, 1.9M-row sample on a laptop that was busy with other work (load average 5 to 10), so an idle machine is faster. The stages of a run from the CSV, and what each costs now (the parse and the ragged-row scan overlap the byte scan, so the first row is one wall-clock figure):
+
+| stage | before | now |
+| --- | --- | --- |
+| byte scan (UTF-8, SHA-256, line endings, blank lines) | 1.7 s | 1.0 s |
+| ragged-row detection | 0.25 s | overlapped with the scan, on a thread |
+| cast-failure count, then typed read | 0.7 s + 0.55 s (two parses) | one parse, overlapped with the scan: the three rows above take 1.8 s together, from 2.5 s |
+| derived columns and dedupe flags | 1.15 s | 1.15 s (0.04 s read back from the cache) |
+| row rules (counts) | 0.55 s | 0.3 s, on a thread beside the dataset checks |
+| dataset checks | 1.2 s | 0.8 s |
+| row flags | 0.4 s | 0.3 s |
+| curated Parquet write | 0.45 s | 0.5 s |
+
+Whole runs, alternating old and new builds on the same busy machine (load average 9 to 17, so all of these are inflated; the old build's three runs: 9 to 12 s from the CSV, 10 to 12 s on a cache miss, 5.4 to 5.9 s on a hit; the new build's: 5.7 to 7.5 s, 7.1 to 8.6 s and 2.8 to 3.6 s). On a load of 5 the new build took 2.2 s from a warm cache.
+
+What changed: the byte scan never copies a chunk and hashes on a worker thread; the CSV is parsed once, the typed columns and the per-column cast-failure flags coming out of one lazy query (a `CastError` is still raised before anything is written); the ragged-row scan and the parse run on threads while the byte scan runs, and their results are judged in the old order; disabled dataset checks are dropped before they run; the row rules are evaluated once into a narrow boolean table that the counts and the curated flags both read; the constant-column and exact-duplicate checks use cheaper, exactly equivalent scans; and the derived columns are cached (see Cache). The results are identical to the previous build's, byte for byte in the curated Parquet.
+
+Budgets, asserted by the opt-in real-data test on an otherwise idle laptop: a run from the CSV under 10 s and a run from a warm cache under 2 s (the aims are 6 s and 2 s). Peak memory is about 2.7 to 3.0 GB from the CSV and about 2 GB from the cache, no more than before.
+
+Run the slow test, which times a run without a cache, with an empty cache and with it, and prints a table of wall time and peak memory:
+
+```sh
+RIDESHARE_QC_DATA=/path/to/Data.csv uv run pytest -m slow -s
+```
+
+On a busy or slower machine stretch both budgets with `RIDESHARE_QC_TIME_SCALE` (default 1.0; for example `RIDESHARE_QC_TIME_SCALE=1.5` allows 15 s and 3 s). The test asserts only loose properties (more than a million rows, a duplicate-order rate under 1%, a currency-suspect share under 5%), never exact values. The data path comes from the environment and is never written to the repository. `tests/test_e2e_synthetic.py` runs the whole CLI on the synthetic fixture in CI (well under a second) and checks every check's `n_failed` against the fixture manifest.
 
 ## Receipt kinds
 
@@ -409,15 +441,16 @@ src/rideshare_data_pipeline/
   report.py           report.json and report.md rendering, samples/<check>.parquet, exit-code policy
   report.schema.json  JSON Schema for report.json (package data)
   schema.py           the 33 expected columns, the raw all-String schema, the casts and their formats
-  cache.py            the opt-in Parquet cache: load_typed, index, atomic writes, schema fingerprint
+  cache.py            the opt-in Parquet cache: load_typed, derive (the derived-columns cache), index, atomic writes, schema and derivation fingerprints
   io.py               extract_member (exactly one safe CSV from a tar or zip), header and UTF-8 validation,
                       the raw scan (UTF-8 validation, SHA-256, line endings in one pass), non-strict typing with per-column cast-failure
                       counts, CSV/Parquet writers
   checks/
     __init__.py       the registry (default_rules, default_dataset_checks) and run_checks:
-                      every RowRule is counted in one lazy select, then the samples of
-                      the failing rules are collected in one batch
-    model.py          Severity, CheckResult, RowRule, DatasetCheck, FlaggedCheck (a dataset check with a per-row flag)
+                      every RowRule is evaluated once into a narrow boolean table (evaluate_rules)
+                      and counted from it, then the samples of the failing rules are
+                      collected in one batch
+    model.py          Severity, CheckResult, RowRule, DatasetCheck, NamedCheck, FlaggedCheck (a dataset check with a per-row flag)
     arithmetic.py     row rules A1-A6, dataset check A7
     temporal.py       row rules T1-T5 (timestamp order, local-vs-UTC tolerance), dataset check T6 (date-only order_time)
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
@@ -434,7 +467,8 @@ tests/
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
   test_schema.py  test_io.py  test_cache.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
   test_checks_arithmetic.py  test_checks_temporal.py  test_checks_outliers.py  test_checks_plausibility.py  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py  test_curated.py
-  test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
+  test_e2e_synthetic.py  the CLI on the synthetic fixture: exit code, schema, every check's n_failed against the manifest, a time budget
+  test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set: loose bounds, timing table, time budgets
 ```
 
 Importing the package doesn't import polars. The modules use PEP 810 `lazy import`, so `rideshare-qc --help` returns at once.
@@ -443,7 +477,7 @@ Importing the package doesn't import polars. The modules use PEP 810 `lazy impor
 
 ```sh
 uv run pytest                    # tests (the real-data test is skipped)
-RIDESHARE_QC_DATA=/path/to/receipts.csv uv run pytest -m slow   # opt-in real-data run
+RIDESHARE_QC_DATA=/path/to/receipts.csv uv run pytest -m slow -s   # opt-in real-data run with timings (see Performance)
 uv run ruff check .              # lint
 uv run ruff format .             # format (CI runs: ruff format --check .)
 uv run mypy .                    # type-check src/ and tests/ (strict)
@@ -459,7 +493,7 @@ Planned work is tracked in the GitHub issues:
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
 - Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19, done), fare outliers (#20, done), trip plausibility (#21, done), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22, done), privacy normalization (#30), and a stakeholder summary (#31).
-- Tests and docs: edge-case inputs (#23, done), end-to-end and performance tests (#24), and the full README (#25).
+- Tests and docs: edge-case inputs (#23, done), end-to-end and performance tests (#24, done), and the full README (#25).
 
 ## License
 

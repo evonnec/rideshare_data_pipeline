@@ -67,6 +67,7 @@ from rideshare_data_pipeline.checks.model import (
     KEY_COLS,
     CheckResult,
     DatasetCheck,
+    NamedCheck,
     RowRule,
     Severity,
 )
@@ -256,4 +257,4 @@ def date_only_check(lf: pl.LazyFrame) -> CheckResult:
 
 def dataset_checks() -> tuple[DatasetCheck, ...]:
     """The temporal checks that need the whole dataset, for the registry."""
-    return (date_only_check,)
+    return (NamedCheck("date_only_order_time", date_only_check),)

@@ -27,6 +27,7 @@ from rideshare_data_pipeline.checks.model import (
     KEY_COLS,
     CheckResult,
     DatasetCheck,
+    NamedCheck,
     RowRule,
     Severity,
 )
@@ -253,4 +254,4 @@ def identity_share_check(lf: pl.LazyFrame) -> CheckResult:
 
 def dataset_checks() -> tuple[DatasetCheck, ...]:
     """The arithmetic checks that need the whole dataset, for the registry."""
-    return (identity_share_check,)
+    return (NamedCheck("identity_share", identity_share_check),)

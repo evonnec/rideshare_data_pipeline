@@ -4,6 +4,7 @@ outputs, config validation and the report wording.
 Every value is made up. F-numbers refer to the findings of the QA report.
 """
 
+import hashlib
 import json
 import random
 import re
@@ -167,7 +168,7 @@ def test_an_unexpected_exception_exits_3_with_one_line(
         msg = "something broke\nsecond line stays out"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(cli_module, "supersede_flags", boom)
+    monkeypatch.setattr(cli_module, "derive", boom)
     assert run_cli(synthetic_csv, tmp_path / "out") == EXIT_INTERNAL_ERROR == 3
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -573,3 +574,26 @@ def test_the_sdist_is_configured_to_ship_tests_tools_example_and_lock() -> None:
     include = project["tool"]["uv"]["build-backend"]["source-include"]
     assert {"tests/**", "tools/**", "qc.example.toml", "uv.lock"} <= set(include)
     assert not (root / "pyproject.toml.orig").exists()
+
+
+# --- the chunked byte scan agrees with a whole-file reference at every chunk size ---
+
+
+def test_scan_bytes_matches_a_reference_for_chunks_longer_than_the_tail_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The scan's fast path (no joined copy of a chunk) needs a chunk of at least
+    # io._TAIL_BYTES bytes; the existing fuzz uses shorter ones.
+    rng = random.Random(46)
+    path = tmp_path / "fuzz.csv"
+    for _ in range(300):
+        data = bytes(rng.choice(b"\r\n\r\nab") for _ in range(rng.randint(0, 300)))
+        path.write_bytes(data)
+        text = data.replace(b"\r", b"")
+        blank = sum(1 for i in range(1, len(text)) if text[i] == text[i - 1] == 10)
+        crlf, lf = data.count(b"\r\n"), data.count(b"\n")
+        ending = "mixed" if crlf and lf > crlf else ("crlf" if crlf else "lf")
+        monkeypatch.setattr(io_module, "_CHUNK_BYTES", rng.randint(16, 60))
+        size, sha256, _, got_ending, got_blank = io_module._scan_bytes(path)
+        assert (size, sha256) == (len(data), hashlib.sha256(data).hexdigest()), data
+        assert (got_ending, got_blank) == (ending, blank), data

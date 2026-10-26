@@ -24,6 +24,7 @@ from rideshare_data_pipeline.checks.model import (
     DatasetCheck,
     FlaggedCheck,
     Frame,
+    NamedCheck,
     RowRule,
     Severity,
     rows_at,
@@ -371,7 +372,7 @@ def dataset_checks() -> tuple[DatasetCheck, ...]:
         FlaggedCheck(
             "duplicate_receipts", duplicate_receipts_check, duplicate_receipts_flag
         ),
-        dedupe_key_unique_check,
+        NamedCheck("dedupe_key_unique", dedupe_key_unique_check),
         FlaggedCheck(
             "cross_panelist_duplicates", cross_panelist_check, cross_panelist_flag
         ),

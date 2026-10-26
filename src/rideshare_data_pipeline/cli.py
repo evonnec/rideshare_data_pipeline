@@ -13,11 +13,11 @@ from pathlib import Path
 # None of these import polars at import time (they use PEP 810 lazy imports), so
 # `rideshare-qc --help` and argument errors return without loading it.
 from rideshare_data_pipeline import __version__
-from rideshare_data_pipeline.cache import CacheStatus, load_typed
+from rideshare_data_pipeline.cache import CacheStatus, derive, load_typed
 from rideshare_data_pipeline.checks import (
     default_dataset_checks,
     default_rules,
-    run_checks,
+    run_checks_evaluated,
 )
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
 from rideshare_data_pipeline.checks.structural import (
@@ -28,6 +28,7 @@ from rideshare_data_pipeline.checks.structural import (
 )
 from rideshare_data_pipeline.config import (
     QCConfig,
+    configure_dataset_checks,
     configure_results,
     configure_rules,
     load_config,
@@ -38,13 +39,11 @@ from rideshare_data_pipeline.curated import (
     row_flags,
     write_curated,
 )
-from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.io import (
     FileFacts,
     InputError,
     input_stem,
 )
-from rideshare_data_pipeline.parse import with_derived
 from rideshare_data_pipeline.report import (
     MemberInfo,
     RunInfo,
@@ -246,23 +245,26 @@ def run(
     # The derived columns (receipt kind, profile, rider-spend flag) are computed
     # once, then the dedupe flag; the checks read them and the curated Parquet
     # keeps them.
-    lf = supersede_flags(with_derived(df)).lazy()
+    lf = derive(loaded, cache_dir).lazy()
     rules = configure_rules(default_rules(config.check_params()), config)
     # One instance of the dataset checks: the outlier pair caches its scores in it,
-    # and the row flags below reuse them.
-    dataset_checks = default_dataset_checks(config.check_params(), config.sample_limit)
+    # and the row flags below reuse them. A disabled check is not run at all.
+    dataset_checks = configure_dataset_checks(
+        default_dataset_checks(config.check_params(), config.sample_limit), config
+    )
+    checked, rule_table = run_checks_evaluated(
+        lf,
+        rules=rules,
+        dataset_checks=dataset_checks,
+        sample_limit=config.sample_limit,
+    )
     results = configure_results(
         [
             header_valid_check(facts),
             utf8_valid_check(facts),
             cast_failures_check(dict.fromkeys(casts(), 0)),
             row_count_band_check(df.height, config.min_rows, config.max_rows),
-            *run_checks(
-                lf,
-                rules=rules,
-                dataset_checks=dataset_checks,
-                sample_limit=config.sample_limit,
-            ),
+            *checked,
         ],
         config,
     )
@@ -270,7 +272,7 @@ def run(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / f"{input_stem(input_path)}.curated.parquet"
-    flags = row_flags(lf, rules, dataset_checks, results)
+    flags = row_flags(lf, rules, dataset_checks, results, rule_table)
     plan = curated_plan(lf, flag_table(lf, flags), drop_columns)
     output_columns = plan.collect_schema().len()
     write_curated(plan, output)
