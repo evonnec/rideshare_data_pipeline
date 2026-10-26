@@ -19,6 +19,7 @@ from rideshare_data_pipeline.checks import (
     kinds,
     parsing,
     structural,
+    temporal,
     uniqueness,
 )
 from rideshare_data_pipeline.checks.model import (
@@ -46,6 +47,7 @@ def default_rules() -> tuple[RowRule, ...]:
         *uniqueness.rules(),
         *kinds.rules(),
         *currency.rules(),
+        *temporal.rules(),
     )
 
 
@@ -58,6 +60,7 @@ def default_dataset_checks() -> tuple[DatasetCheck, ...]:
         *uniqueness.dataset_checks(),
         *parsing.dataset_checks(),
         *currency.dataset_checks(),
+        *temporal.dataset_checks(),
     )
 
 

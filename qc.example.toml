@@ -92,6 +92,31 @@ max_failed_rate = 0.0
 severity = "warn"
 enabled = true
 
+[checks.ingestion_order]     # T1: insert_time <= update_time <= source_dttimestamp <= dttimestamp (where present)
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.order_before_receipt]  # T2: order date <= email date + 1 day (order_time local, email_time UTC)
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.late_receipts]       # T3: email date more than 7 days after the order date (30-day count in the report)
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.order_before_window] # T4: order more than 7 days before the earliest email date
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.email_after_update]  # T5: email_time after update_time
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
 [checks.all_null_columns]    # S4: columns that are null in every row (info, no threshold)
 severity = "info"
 enabled = true
@@ -149,4 +174,8 @@ enabled = true
 [checks.currency_suspect_rows]  # CUR1: non-US sender, km distance or Spanish/Portuguese subject
 max_failed_rate = 0.0           # (a warning: the gate is money.usd_rides, not this verdict)
 severity = "warn"
+enabled = true
+
+[checks.date_only_order_time]  # T6: per merchant, the share of order_time at exactly midnight (info, no threshold)
+severity = "info"
 enabled = true

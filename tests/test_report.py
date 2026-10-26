@@ -52,6 +52,12 @@ IMPLEMENTED = (
     "CUR1",
     "V1",
     "V3",
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
 )
 ARITH_WARNS = ("zero_fare_rides", "discount_within_subtotal", "tax_within_total")
 DUPLICATE_CHECKS = (
@@ -61,6 +67,8 @@ DUPLICATE_CHECKS = (
     "duplicate_receipts",
     "cross_panelist_duplicates",
     "near_duplicate_rides",
+    "late_receipts",
+    "order_before_window",
     *ARITH_WARNS,
 )
 LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n" + "".join(
@@ -145,8 +153,10 @@ def test_run_writes_reports_and_samples(
         "discount_within_subtotal.parquet",
         "duplicate_receipts.parquet",
         "id_formats.parquet",
+        "late_receipts.parquet",
         "near_duplicate_rides.parquet",
         "non_negative_total.parquet",
+        "order_before_window.parquet",
         "tax_within_total.parquet",
         "unknown_sender.parquet",
         "zero_fare_rides.parquet",
@@ -195,10 +205,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 10,  # V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5
-        "info": 5,
-        "passed": 18,
-        "total": 29,
+        "warnings_failed": 12,  # V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4
+        "info": 6,
+        "passed": 22,
+        "total": 35,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -418,7 +428,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 11  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5
+    assert report["summary"]["warnings_failed"] == 13  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
@@ -691,6 +701,45 @@ def test_report_arithmetic_section_shows_the_identity_breakdown(
     a7 = checks_by_name(load(out))["identity_share"]
     assert a7["details"]["holds"] == MANIFEST["A7"]  # type: ignore[index]
     jsonschema.validate(load(out), json.loads(schema_text()))
+
+
+def test_report_time_section_shows_the_window_tolerance_and_date_only_shares(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out, config=LOOSE_V2)
+    text = (out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Time")[1].split("## Column profile")[0]
+    report = load(out)
+    window = report["run"]["window"]  # type: ignore[index]
+    assert f"Email window: {window['start']} to {window['end']}" in section
+    assert "| order date after email date + 1 day (T2, error) | 0 |" in section
+    assert "| order time after email time, no tolerance | 1 |" in section
+    assert "| email more than 7 days after the order (T3) | 1 |" in section
+    assert "| email more than 30 days after the order | 1 |" in section
+    assert "T2 tolerance is one day" in section
+    assert f"| Uber | {MANIFEST['T6']:,} | {MANIFEST['T6']:,} | 100.00% |" in section
+    assert "| Lyft |" in section
+    assert "| 0 | 0.00% |" in section
+    t6 = checks_by_name(report)["date_only_order_time"]
+    assert t6["details"]["by_merchant"]["Uber"]["date_only"] == MANIFEST["T6.Uber"]  # type: ignore[index]
+    jsonschema.validate(report, json.loads(schema_text()))
+
+
+def test_report_time_section_when_checks_are_disabled(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    config = LOOSE_V2 + "".join(
+        f"[checks.{n}]\nenabled = false\n"
+        for n in ("order_before_receipt", "date_only_order_time")
+    )
+    run_cli(full_synthetic_csv, out, config=config)
+    text = (out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Time")[1].split("## Column profile")[0]
+    assert "date_only_order_time is disabled" in section
+    assert "T2 tolerance" not in section
+    assert "(T3)" in section
 
 
 def test_report_arithmetic_section_when_a7_is_disabled(

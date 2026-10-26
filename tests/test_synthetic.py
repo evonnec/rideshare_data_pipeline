@@ -242,6 +242,12 @@ def test_implemented_checks_match_the_manifest(
             "CUR1",
             "V1",
             "V3",
+            "T1",
+            "T2",
+            "T3",
+            "T4",
+            "T5",
+            "T6",
         )
     }
     # K1's n_failed is the non-spend rows; K2 (unclassified templates) finds none.
@@ -494,6 +500,56 @@ def test_arithmetic_checks_hit_their_injections_and_nothing_else(
     assert a7.metric == MANIFEST["A7"] / MANIFEST["USD.rides"]
 
 
+def test_temporal_checks_hit_their_injections_and_nothing_else(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    d = full_synthetic_derived
+    for check_id in ("T1", "T2", "T3", "T4", "T5"):
+        assert by_id[check_id].n_failed == MANIFEST[check_id], check_id
+    assert [by_id[k].passed for k in ("T1", "T2", "T3", "T4", "T5")] == [
+        True,
+        True,
+        False,
+        False,
+        True,
+    ]
+    assert by_id["T3"].details["by_field"] == {"over_30_days": MANIFEST["T3.30d"]}
+    # T3 and T4 fire on the ancient order, and only on it.
+    (ancient,) = INJECTIONS["ancient_order"]
+    for check_id in ("T3", "T4"):
+        sample = by_id[check_id].sample
+        assert sample is not None
+        assert sample["checksum"].to_list() == [d["checksum"][ancient]], check_id
+    # The negative controls: the APAC row (order date = email date + 1) is within
+    # the tolerance but is after its email as an instant; the Lyft 5 h row is not.
+    (apac,) = INJECTIONS["apac_next_day"]
+    assert d["order_time"][apac] > d["email_time"][apac]
+    assert by_id["T2"].details["by_field"] == {"order_after_email_no_tolerance": 1}
+    # The tip update keeps its ride's insert_time, which precedes its email_time.
+    _, update = INJECTIONS["ride_tip_update"]
+    assert d["insert_time"][update] < d["email_time"][update]
+
+
+def test_date_only_check_matches_the_manifest(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    t6 = next(
+        r for r in run_checks(full_synthetic_derived.lazy()) if r.check_id == "T6"
+    )
+    assert t6.passed
+    assert t6.n_failed == MANIFEST["T6"]
+    merchants = t6.details["by_merchant"]
+    assert isinstance(merchants, dict)
+    assert {m: v["date_only"] for m, v in merchants.items()} == {
+        m: MANIFEST[f"T6.{m}"] for m in merchants if f"T6.{m}" in MANIFEST
+    } | {m: 0 for m in merchants if f"T6.{m}" not in MANIFEST}
+    # Uber order_time is date-only throughout; Lyft carries a time of day.
+    assert merchants["Uber"]["share"] == 1.0
+    assert "T6.Lyft" not in MANIFEST
+    assert merchants["Lyft"]["date_only"] == 0
+
+
 def test_degenerate_columns_are_the_documented_ones(
     full_synthetic_derived: pl.DataFrame,
 ) -> None:
@@ -540,6 +596,11 @@ def test_cli_end_to_end_on_the_full_fixture(
         "category_mismatch",
         "merchant_sender_consistent",
         "unknown_sender",
+        "ingestion_order",
+        "order_before_receipt",
+        "late_receipts",
+        "order_before_window",
+        "email_after_update",
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
@@ -553,6 +614,7 @@ def test_cli_end_to_end_on_the_full_fixture(
         "near_duplicate_rides",
         "description_parse_coverage",
         "currency_suspect_rows",
+        "date_only_order_time",
     ]
     assert lines["non_negative_total"][1] == "FAIL"
     spend = N_ROWS - MANIFEST["K1.non_spend"]

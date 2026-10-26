@@ -175,6 +175,8 @@ MANIFEST: dict[str, int] = {
     "A7.below": 8,
     "T1": 0,  # insert <= update <= source_dttimestamp <= dttimestamp
     "T5": 0,  # email_time <= update_time in every row (tip update included)
+    # T6 (info) is derived from the generated rows just after they are built (see
+    # below): the rows whose order_time is at 00:00:00.000, in total and per merchant.
 }
 
 # The sum of order_total_amount over the USD.rides rows: the naive total less what the
@@ -791,6 +793,20 @@ def build_rows(seed: int = SEED) -> tuple[list[Row], dict[str, tuple[int, ...]]]
 
 
 _DEFAULT_ROWS, INJECTIONS = build_rows()
+
+
+def _date_only_counts(rows: list[Row]) -> dict[str, int]:
+    """T6 by construction: order_time at midnight, per merchant (and in total)."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row["order_time"].endswith(" 00:00:00.000"):
+            counts[row["merchant_name"]] = counts.get(row["merchant_name"], 0) + 1
+    return counts
+
+
+_DATE_ONLY = _date_only_counts(_DEFAULT_ROWS)
+MANIFEST["T6"] = sum(_DATE_ONLY.values())
+MANIFEST.update({f"T6.{merchant}": n for merchant, n in _DATE_ONLY.items()})
 
 
 def write_synthetic_csv(path: Path, seed: int = SEED) -> Path:
