@@ -190,6 +190,9 @@ def test_registry_rules() -> None:
         "late_receipts": Severity.WARN,
         "order_before_window": Severity.WARN,
         "email_after_update": Severity.WARN,
+        "implausible_speed": Severity.WARN,
+        "zero_trip_metrics": Severity.WARN,
+        "extreme_trip": Severity.WARN,
     }
     assert len(default_dataset_checks()) == 16
 
