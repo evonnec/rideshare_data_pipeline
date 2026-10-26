@@ -1,7 +1,7 @@
 """An opt-in, content-addressed Parquet cache of the validated, typed frame.
 
-Extracting the 866 MB sample from its bz2 archive takes about 22 s; the same data as
-typed Parquet is a sixth of the size and loads in a few seconds. With a cache
+Extracting a large sample from its bz2 archive takes tens of seconds; the same data
+as typed Parquet is a fraction of the size and loads in a few seconds. With a cache
 directory configured, the first run on an input writes::
 
     <cache>/<sha256 of the input file as given>/data.parquet   typed, zstd
@@ -113,7 +113,7 @@ def derivation_fingerprint() -> str:
     the point: editing the derivation logic changes the fingerprint on its own,
     with no constant to remember to bump, so a stale derived column can't be served;
     the versions only add more invalidation (a release or a polars upgrade
-    rebuilds the derived columns, which costs a second on the sample).
+    rebuilds the derived columns, which costs about a second on a large sample).
     """
     digest = hashlib.sha256()
     digest.update(f"tool={__version__}\0polars={pl.__version__}\0".encode())
@@ -409,7 +409,7 @@ def _store_derived(entry: Path, frame: Frame) -> None:
 def derive(loaded: Loaded, cache_dir: rio.StrPath | None = None) -> Frame:
     """The typed frame with the derived and dedupe-flag columns added.
 
-    Deriving costs about 1.2 s on the 1.9M-row sample (the subject and description
+    Deriving costs about a second on a ~2M-row sample (the subject and description
     regexes, the dedupe sort). With a cache directory the derived columns are kept in
     the entry of this input (``derived.parquet``) and read back on later runs,
     only while the entry's recorded derivation_fingerprint() matches this code's

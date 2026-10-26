@@ -34,8 +34,8 @@ where there is a reason. Rows are flagged, never dropped, and no exchange rate i
 applied.
 
 A Spanish or Portuguese subject from a US sender is **not** a currency reason: in
-the full sample all 2,552 such rows come from US senders, state miles where they
-state a distance, and cost a median $2.38/mile, in line with USD. The language
+the sample those rows come from US senders, state miles where they state a
+distance, and cost about the same per mile as USD rides. The language
 stays findable as the info flag ``foreign_subject`` (true for any such subject,
 suspect or not), which gates nothing.
 
@@ -116,7 +116,7 @@ FAMILIES: tuple[Family, ...] = (
 )
 
 # Case-insensitive substrings per family, in matching order (Aho-Corasick, much
-# cheaper than a regex per family on 1.9M rows).
+# cheaper than a regex per family on millions of rows).
 _FAMILY_KEYWORDS: tuple[tuple[Family, tuple[str, ...]], ...] = (
     ("express_pool", ("express",)),
     ("shared", ("pool", "share", "line")),
@@ -203,7 +203,7 @@ CURRENCY_REASONS: tuple[str, ...] = ("non_us_sender", "km_unit", "foreign_langua
 
 # The description is read with a few simple regexes and keyword scans rather than
 # one regex per template: a regex that captures several groups is several times
-# slower on 1.9M rows than the same work in single-group passes.
+# slower on millions of rows than the same work in single-group passes.
 #
 # A distance and its unit: ``1.63mi``, ``9.93 mi``, ``2.00 miles``, ``7.5 km``,
 # ``3 kilometers``, with an optional thousands separator. The unit must end at a

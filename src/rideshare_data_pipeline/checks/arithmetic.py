@@ -97,10 +97,8 @@ def unexplained_residual() -> pl.Expr:
 
     Positive-only, not ``abs``: a residual far BELOW zero is an unlisted credit or
     refund (the total is lower than the itemized lines), which is the benign side;
-    the warning is for a total far above what is itemized. On the real file the
-    positive-only count is 2,011 against 2,179 for ``abs`` (the 168 extra are
-    negative); the review's figure was 2,024, which only the positive-only
-    reading approximates (the gap is its slightly different population).
+    the warning is for a total far above what is itemized. Counting the absolute
+    value instead would add the negative-residual rows, which are the benign side.
     """
     limit = pl.max_horizontal(
         pl.lit(float(RESIDUAL_FLOOR_CENTS)), cents("order_subtotal")
@@ -130,7 +128,7 @@ def rules() -> tuple[RowRule, ...]:
             rule="order_total_amount >= 0 on rider-spend receipts",
             predicate=pl.col("order_total_amount") < 0,
             # A refund on a bike, pass or other non-ride receipt is not a rider-spend
-            # error (on the real file every negative total is a bike or scooter).
+            # error (in the sample the negative totals are bike or scooter receipts).
             applies_to=pl.col("is_rider_spend"),
         ),
         RowRule(

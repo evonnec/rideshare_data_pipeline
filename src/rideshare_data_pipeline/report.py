@@ -868,10 +868,10 @@ def _outliers_section(results: Sequence[CheckResult]) -> list[str]:
         "within merchant x product family. A ride is an O4 outlier only when its "
         "price per mile and its price per minute are both extreme, so long or slow "
         "trips are not flagged for their length alone. Fares are heavy-tailed and "
-        "grow with distance, which a raw z-score or fence ignores (it flags 1-3% of "
-        "rows, almost all of them long trips). The threshold k sets how many rows "
-        "get reviewed; it is a budget, not a false-positive rate. There is no "
-        "machine learning: a z-score on a log scale says why a row was flagged, "
+        "grow with distance, which a raw z-score or fence ignores (it flags a few "
+        "percent of rows, almost all of them long trips). The threshold k sets how "
+        "many rows get reviewed; it is a budget, not a false-positive rate. There "
+        "is no machine learning: a z-score on a log scale says why a row was flagged, "
         "and an isolation forest flagged different rows without a reason to read.",
         "",
     ]

@@ -143,7 +143,7 @@ def evaluate_rules(lf: pl.LazyFrame, rules: Sequence[RowRule]) -> pl.DataFrame:
 
     Per rule ``i``: ``failed_i`` (the rows that fail it, see `fails`), ``evaluated_i``
     (the rows it applies to) and ``field_i_j`` (its j-th breakdown field). Booleans
-    are bit-packed, so the table is a few MB on the 1.9M-row sample, and counting
+    are bit-packed, so the table is a few MB on a ~2M-row file, and counting
     a column from it costs nothing; materializing the columns is also about twice as
     fast as aggregating them in the scan. The curated flags reuse the ``failed_i``
     columns (see ``curated.row_flags``), so each predicate runs over the data once.

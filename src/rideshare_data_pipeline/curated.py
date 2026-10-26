@@ -125,10 +125,10 @@ def flag_table(lf: Lazy, flags: Sequence[RowFlag]) -> pl.DataFrame:
     """Evaluate the flags once: ``qc_<check>``, ``qc_error``, ``qc_warn``, ``qc_flags``.
 
     One narrow frame with a row per row of `lf`, in its order. The booleans are
-    bit-packed (about 16 MB for 40 flags on 1.9M rows), so this is not a second copy
+    bit-packed (one bit per flag per row), so this is not a second copy
     of the data. Building ``qc_flags`` per row for every row would dominate the run
-    (a 40-way list per row), and about 3% of the rows fail anything, so the names
-    are built for the failing rows only and joined back by position.
+    (a 40-way list per row), and only a small share of the rows fail anything, so
+    the names are built for the failing rows only and joined back by position.
     """
     columns = [f.column for f in flags]
 

@@ -1,8 +1,8 @@
 """The population every money statistic is computed on, and the spend waterfall.
 
 ``order_total_amount`` has no currency column, so a plain sum mixes dollars with
-pesos (about 0.5% of rows from non-US merchant senders are about 37% of a naive
-total). ``usd_rides`` is THE population for every money statistic and outlier
+pesos (a small share of rows, from non-US merchant senders, can be a large share
+of a naive total). ``usd_rides`` is THE population for every money statistic and outlier
 baseline: totals, quantiles, $/mile and $/minute baselines, per-panelist spend and
 volume checks (#18, #20, #27...). A check that sums or ranks ``order_total_amount``
 must start from it, or state why it doesn't.
