@@ -150,6 +150,7 @@ def test_report_json_content_matches_the_manifest(
         **{k: MANIFEST[k] for k in IMPLEMENTED},
         "K1": MANIFEST["K1.non_spend"],
         "K2": 0,
+        "PC1": MANIFEST["PC1"],
     }
     assert report["schema_version"] == 1
     assert report["exit_code"] == 1
@@ -157,8 +158,8 @@ def test_report_json_content_matches_the_manifest(
         "errors_failed": 1,
         "warnings_failed": 4,  # V2, U2, U3, U4
         "info": 4,
-        "passed": 8,
-        "total": 13,
+        "passed": 9,
+        "total": 14,
     }
     run = report["run"]
     assert isinstance(run, dict)

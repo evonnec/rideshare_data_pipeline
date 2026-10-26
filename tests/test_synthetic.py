@@ -205,7 +205,12 @@ def test_implemented_checks_match_the_manifest(
         for k in ("S2", "A1", "U1", "S4", "S5", "U0", "V2", "U2", "U2b", "U3", "U4")
     }
     # K1's n_failed is the non-spend rows; K2 (unclassified templates) finds none.
-    assert found == {**expected, "K1": MANIFEST["K1.non_spend"], "K2": 0}
+    assert found == {
+        **expected,
+        "K1": MANIFEST["K1.non_spend"],
+        "K2": 0,
+        "PC1": MANIFEST["PC1"],
+    }
 
 
 def test_duplicate_checks_match_the_manifest(
@@ -369,6 +374,7 @@ def test_cli_end_to_end_on_the_full_fixture(
         "dedupe_key_unique",
         "cross_panelist_duplicates",
         "near_duplicate_rides",
+        "description_parse_coverage",
     ]
     assert lines["non_negative_total"][1] == "FAIL"
     spend = N_ROWS - MANIFEST["K1.non_spend"]
@@ -385,7 +391,58 @@ def test_cli_end_to_end_on_the_full_fixture(
         assert lines[name][1] == "PASS"
         assert lines[name][3].startswith("0/")
     assert pl.read_parquet(out / "synthetic.parquet").height == N_ROWS
+    report = (out / "report.md").read_text(encoding="utf-8")
+    section = report.split("## Description parsing")[1].split("## Column profile")[0]
+    assert "| Lyft |" in section
+    assert "| 100.00% |" in section
+    assert "Distance unit: mi " in section
+    assert "| uberx |" in section
+    assert "| lyft_standard |" in section
 
 
 def test_build_synthetic_is_repeatable() -> None:
     assert build_synthetic().equals(build_synthetic())
+
+
+def test_parsed_trip_columns_of_the_injections(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    df = full_synthetic_derived
+    (zero,) = INJECTIONS["zero_duration_trip"]
+    # A parsed zero is 0, not null: O2 counts it.
+    assert df["duration_s"][zero] == 0
+    assert df["distance_mi"][zero] == 2.0
+    (fast,) = INJECTIONS["implausible_speed"]
+    assert df["distance_mi"][fast] == 60.0
+    assert df["duration_s"][fast] == 1200
+    (km,) = INJECTIONS["km_generic_sender"]
+    assert df["distance_unit"][km] == "km"
+    assert df["distance_mi"][km] == pytest.approx(6.8 * 0.621371)
+    assert df["duration_s"][km] == 11 * 60
+    assert df["product_family"][km] == "uberx"
+
+
+def test_product_families_of_the_baseline(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    base = full_synthetic_derived.head(N_BASELINE)
+    families = {
+        m: set(base.filter(pl.col("merchant_name") == m)["product_family"])
+        for m in ("Uber", "Lyft")
+    }
+    assert families == {"Uber": {"uberx"}, "Lyft": {"lyft_standard"}}
+    assert base["distance_mi"].null_count() == 0
+    assert base["duration_s"].null_count() == 0
+    assert set(base["distance_unit"]) == {"mi"}
+
+
+def test_pc1_counts_no_unparsed_ride_row(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    pc1 = by_id["PC1"]
+    assert pc1.n_failed == MANIFEST["PC1"]
+    assert pc1.passed
+    merchants = pc1.details["merchants"]
+    assert isinstance(merchants, dict)
+    assert set(merchants) == {"Uber", "Lyft"}

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from rideshare_data_pipeline.checks.model import CheckResult, Frame, Severity
 from rideshare_data_pipeline.config import QCConfig
-from rideshare_data_pipeline.parse import KINDS
+from rideshare_data_pipeline.parse import FAMILIES, KINDS
 
 SCHEMA_VERSION = 1
 SAMPLES_DIR = "samples"
@@ -306,6 +306,70 @@ def _duplicates_section(results: Sequence[CheckResult]) -> list[str]:
     return ["_Not available: the duplicate_receipts check is disabled._", ""]
 
 
+def _parsing_section(results: Sequence[CheckResult]) -> list[str]:
+    """The "Description parsing" section body, from ``description_parse_coverage``."""
+    for r in results:
+        if r.name != "description_parse_coverage":
+            continue
+        d = r.details
+        merchants, units, families = (
+            d.get("merchants"),
+            d.get("units"),
+            d.get("families"),
+        )
+        if not (
+            isinstance(merchants, Mapping)
+            and isinstance(units, Mapping)
+            and isinstance(families, Mapping)
+        ):
+            return ["_Not available._", ""]
+        names = [str(m) for m in merchants]
+        out = [
+            "Ride and tip-update receipts that are not superseded; a row is parsed "
+            "when both its distance and its duration are read.",
+            "",
+            *_table(
+                ["merchant", "rows", "parsed", "coverage"],
+                [
+                    [
+                        m,
+                        f"{v['rows']:,}",
+                        f"{v['parsed']:,}",
+                        f"{v['coverage']:.2%}",
+                    ]
+                    for m, v in merchants.items()
+                ],
+                right=(1, 2, 3),
+            ),
+            "",
+            "Distance unit: " + ", ".join(f"{u} {n:,}" for u, n in units.items()) + ".",
+            "",
+        ]
+        kinds = [f for f in (*FAMILIES, "(none)") if any(families[m][f] for m in names)]
+        out += [
+            *_table(
+                ["product family", *names],
+                [[f, *(f"{families[m][f]:,}" for m in names)] for f in kinds],
+                right=range(1, len(names) + 1),
+            ),
+            "",
+        ]
+        shapes = d.get("unparsed_shapes")
+        if isinstance(shapes, list) and shapes:
+            out += [
+                "Most common unparsed description shapes (digits shown as #):",
+                "",
+                *_table(
+                    ["shape", "rows"],
+                    [[s["shape"], f"{s['count']:,}"] for s in shapes],
+                    right=(1,),
+                ),
+                "",
+            ]
+        return out
+    return ["_Not available: the description_parse_coverage check is disabled._", ""]
+
+
 def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> str:
     """Render the report as Markdown."""
     s = summarize(results)
@@ -344,6 +408,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out += _composition_table(results)
     out += ["## Duplicate receipts", ""]
     out += _duplicates_section(results)
+    out += ["## Description parsing", ""]
+    out += _parsing_section(results)
     out += ["## Column profile", ""]
     all_null = _columns(results, "all_null_columns")
     constant = _columns(results, "constant_columns")

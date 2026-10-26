@@ -29,7 +29,18 @@ first: the first rule that matches names the kind (see ``_rules``). A row that
 matches no rule defaults to ``ride`` and is flagged by ``subject_unclassified``,
 which the ``unclassified_subject_templates`` check counts, so a new vendor template
 shows up instead of silently counting as a ride.
+
+Trip metrics
+------------
+``product_description`` carries the product, distance and duration of a trip in a
+few templates (see ``_raw``). ``distance_mi``,
+``distance_unit``, ``duration_s`` and ``product_family`` read them; every one is
+null on a line that is not a trip (``Increase Tip``, ``Earnings``, a null), and a
+trip that states 0 miles or 0 seconds is 0, never null. ``product_family`` has a
+short list of values (``FAMILIES``) so that products can be compared across vendors.
 """
+
+from collections.abc import Mapping
 
 lazy import polars as pl
 
@@ -37,6 +48,9 @@ from rideshare_data_pipeline.dedupe import FLAG_NAMES
 
 type Kind = str
 """One of KINDS."""
+
+type Family = str
+"""One of FAMILIES."""
 
 # Report order: rider-spend kinds first, then the rest.
 KINDS: tuple[Kind, ...] = (
@@ -66,6 +80,39 @@ MISMATCHED_CATEGORY_KINDS: frozenset[Kind] = frozenset(
 # The vendor's code for a driver-earnings receipt; no other kind carries it.
 ORDER_PICKUP_EARNINGS = 4
 
+# Product families, from the product label of a trip line. The keywords below are
+# tried in order on the description and the first family that matches wins, so "Express
+# Pool" is express_pool (not shared) and "Black VIP" is vip (not black_lux).
+# ``lyft_standard`` is the plain Lyft ride (label "Lyft"); ``other`` is a trip line
+# whose product is none of these (or has no label, like a Lyft "Base fare" line).
+FAMILIES: tuple[Family, ...] = (
+    "uberx",
+    "lyft_standard",
+    "shared",
+    "express_pool",
+    "xl",
+    "black_lux",
+    "comfort",
+    "vip",
+    "other",
+)
+
+# Case-insensitive substrings per family, in matching order (Aho-Corasick, much
+# cheaper than a regex per family on 1.9M rows).
+_FAMILY_KEYWORDS: tuple[tuple[Family, tuple[str, ...]], ...] = (
+    ("express_pool", ("express",)),
+    ("shared", ("pool", "share", "line")),
+    ("vip", ("vip",)),
+    ("black_lux", ("black", "lux", "suv", "premier")),
+    ("xl", ("xl",)),
+    ("comfort", ("select", "plus", "comfort")),
+    ("uberx", ("uberx",)),
+    ("lyft_standard", ("lyft",)),
+)
+
+DISTANCE_UNITS: tuple[str, ...] = ("mi", "km")
+
+MI_PER_KM = 0.621371
 UNKNOWN_TEMPLATE_LIMIT = 120
 """Characters of a normalised subject template kept in a report."""
 
@@ -123,6 +170,128 @@ def subject_template() -> pl.Expr:
         .fill_null("<no subject>")
         .alias("subject_template")
     )
+
+
+# The description is read with a few simple regexes and keyword scans rather than
+# one regex per template: a regex that captures several groups is several times
+# slower on 1.9M rows than the same work in single-group passes.
+#
+# A distance and its unit: ``1.63mi``, ``9.93 mi``, ``2.00 miles``, ``7.5 km``,
+# ``3 kilometers``, with an optional thousands separator. The unit must end at a
+# word boundary, so ``32 min`` is not a distance.
+# (?-u) makes \d, \s and \b ASCII-only, which is markedly faster than Unicode.
+_UNITS = r"(?:miles|mi|kilometers|kilometres|(?u:kilómetros)|km)\b"
+_DISTANCE = rf"(?-u)(\d[\d,]*(?:\.\d+)?|\.\d+)\s*{_UNITS}"
+_KM = r"(?-u)\d\s*(?:km|kilomet|(?u:kilómetros))"
+
+# A duration is some of: hours (``1h``, ``1 h``), minutes (``12m``, ``32 min``,
+# ``min(s)``), seconds (``23s``), or the clock of the older Uber template
+# (``00:15:14 Trip time``, two digits a part); a part a template omits is 0.
+_HOURS = r"(?-u)(\d+)\s*h\b"
+_MINUTES = r"(?-u)(\d+)\s*m(?:ins?)?\b"
+_SECONDS = r"(?-u)(\d+)s\b"
+_CLOCK = r"(?-u)(\d\d:\d\d:\d\d)\s+Trip time"
+
+type Raw = Mapping[str, pl.Expr]
+"""The raw scans of a description: strings and flags, before any arithmetic."""
+
+
+def _raw() -> dict[str, pl.Expr]:
+    """The scans every trip column is built from, each a single pass over the text.
+
+    ``dist``, ``h``, ``m``, ``s`` and ``clock`` are the matched text (null if
+    absent), ``km`` says the unit is kilometres, and ``hit<i>`` whether the
+    description names family ``i`` of ``_FAMILY_KEYWORDS``.
+    """
+    d = pl.col("product_description")
+    raw = {
+        "dist": d.str.extract(_DISTANCE, 1),
+        "km": d.str.contains(_KM),
+        "h": d.str.extract(_HOURS, 1),
+        "m": d.str.extract(_MINUTES, 1),
+        "s": d.str.extract(_SECONDS, 1),
+        "clock": d.str.extract(_CLOCK, 1),
+    }
+    for i, (_, words) in enumerate(_FAMILY_KEYWORDS):
+        raw[f"hit{i}"] = d.str.contains_any(list(words), ascii_case_insensitive=True)
+    return raw
+
+
+def _stored(prefix: str) -> dict[str, pl.Expr]:
+    """``_raw()`` read back from columns named ``<prefix><key>`` (see with_derived)."""
+    return {key: pl.col(f"{prefix}{key}") for key in _raw()}
+
+
+def _miles(raw: Raw) -> pl.Expr:
+    """Distance in miles; null if no distance, 0.0 if it states zero. Km convert."""
+    miles = raw["dist"].str.replace_all(",", "", literal=True).cast(pl.Float64)
+    return pl.when(raw["km"]).then(miles * MI_PER_KM).otherwise(miles)
+
+
+def _unit(raw: Raw) -> pl.Expr:
+    """``km`` or ``mi`` where a distance was found, else null."""
+    return (
+        pl.when(raw["dist"].is_not_null())
+        .then(pl.when(raw["km"]).then(pl.lit("km")).otherwise(pl.lit("mi")))
+        .cast(pl.Enum(DISTANCE_UNITS))
+    )
+
+
+def _seconds(raw: Raw) -> pl.Expr:
+    """Duration in seconds; null if the line has no duration, 0 if it states zero.
+
+    Absent parts of a matched template count as 0 (``45s`` is 45, ``| 1 h`` is 3600).
+    """
+    clock = raw["clock"]
+
+    def part(text: pl.Expr, offset: int) -> pl.Expr:
+        # The clock is always ``HH:MM:SS`` (see _CLOCK), so a part is a slice.
+        both = pl.coalesce(text, clock.str.slice(offset, 2))
+        return both.cast(pl.Int64, strict=False)
+
+    h, m, s = part(raw["h"], 0), part(raw["m"], 3), part(raw["s"], 6)
+    return pl.when(pl.coalesce(h, m, s).is_not_null()).then(
+        h.fill_null(0) * 3600 + m.fill_null(0) * 60 + s.fill_null(0)
+    )
+
+
+def _family(raw: Raw) -> pl.Expr:
+    """The product family of a trip line (one that states a distance); else null.
+
+    The family keywords are looked up in the whole description (the label is the
+    only place they occur on a trip line). The first family of ``_FAMILY_KEYWORDS``
+    that was hit wins, and a trip line that hit none, like a Lyft "Base fare" line,
+    is ``other``.
+    """
+    chain = pl.coalesce(
+        pl.when(raw[f"hit{i}"]).then(pl.lit(family))
+        for i, (family, _) in enumerate(_FAMILY_KEYWORDS)
+    )
+    return (
+        pl.when(raw["dist"].is_not_null())
+        .then(chain.fill_null("other"))
+        .cast(pl.Enum(FAMILIES))
+    )
+
+
+def distance_mi() -> pl.Expr:
+    """The trip distance in miles (Float64), km converted; null if not a trip line."""
+    return _miles(_raw()).alias("distance_mi")
+
+
+def distance_unit() -> pl.Expr:
+    """The unit the description states, ``mi`` or ``km`` (Enum); null if none."""
+    return _unit(_raw()).alias("distance_unit")
+
+
+def duration_s() -> pl.Expr:
+    """The trip duration in seconds (Int64); null if not a trip line."""
+    return _seconds(_raw()).alias("duration_s")
+
+
+def product_family() -> pl.Expr:
+    """The product family (Enum FAMILIES); null if the description isn't a trip."""
+    return _family(_raw()).alias("product_family")
 
 
 def _rules() -> tuple[tuple[Kind, pl.Expr], ...]:
@@ -248,6 +417,10 @@ DERIVED_NAMES: tuple[str, ...] = (
     "subject_profile",
     "subject_unclassified",
     "is_rider_spend",
+    "distance_mi",
+    "distance_unit",
+    "duration_s",
+    "product_family",
 )
 """The names of the columns derived_columns() adds."""
 
@@ -262,31 +435,53 @@ def input_columns(lf: pl.LazyFrame) -> pl.LazyFrame:
 
 def derived_columns() -> list[pl.Expr]:
     """The columns added to the typed frame, for one ``with_columns`` call."""
-    return [receipt_kind(), subject_profile(), subject_unclassified(), is_rider_spend()]
+    return [
+        receipt_kind(),
+        subject_profile(),
+        subject_unclassified(),
+        is_rider_spend(),
+        distance_mi(),
+        distance_unit(),
+        duration_s(),
+        product_family(),
+    ]
 
 
 _MATCHED = "_matched_kind"
+_RAW = "_raw_"
 
 
 def with_derived(df: pl.DataFrame) -> pl.DataFrame:
     """Add the derived columns to `df`: the same result as ``with_columns`` of
-    ``derived_columns()``, in about a third of the time.
+    ``derived_columns()``, in a fraction of the time.
 
     ``derived_columns()`` builds each column from the rule chain on its own, so the
     subject regexes run once per column. Here the chain is evaluated once into a
     temporary column and the kind, the unclassified flag and the rider-spend flag
-    are read off it.
+    are read off it; likewise every description scan (``_raw``) runs once, as its
+    own temporary column so that polars runs them in parallel, and the trip
+    columns are built from those.
     """
     matched = pl.col(_MATCHED)
+    raw = _stored(_RAW)
+    temp = [_MATCHED, *(f"{_RAW}{key}" for key in raw)]
     return (
-        df.with_columns(_first_match().alias(_MATCHED), subject_profile())
+        df.with_columns(
+            _first_match().alias(_MATCHED),
+            subject_profile(),
+            *(expr.alias(f"{_RAW}{key}") for key, expr in _raw().items()),
+        )
         .with_columns(
             matched.fill_null("ride").cast(pl.Enum(KINDS)).alias("receipt_kind"),
             matched.is_null().alias("subject_unclassified"),
             matched.fill_null("ride")
             .is_in(sorted(RIDER_SPEND_KINDS))
             .alias("is_rider_spend"),
+            _miles(raw).alias("distance_mi"),
+            _unit(raw).alias("distance_unit"),
+            _seconds(raw).alias("duration_s"),
+            _family(raw).alias("product_family"),
         )
-        .drop(_MATCHED)
+        .drop(temp)
         .select(*df.columns, *DERIVED_NAMES)
     )

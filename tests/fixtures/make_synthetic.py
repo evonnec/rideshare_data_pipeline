@@ -134,6 +134,10 @@ MANIFEST: dict[str, int] = {
     "U5": 12,  # many_rides_one_day: rows in the over-threshold panelist-day
     "U5.panelist_days": 1,
     "U6": 1,  # overlapping_rides: the earlier trip
+    # Every ride and tip-update row has a parseable "<product> <d> mi|km | <m> min" or
+    # "Lyft fare (<d>mi, <m>m <s>s)" description (the one tip update copies its
+    # ride's), so no row is unparsed.
+    "PC1": 0,
     "PR1": 2,  # masked_subjects
     # More negative controls: the baseline and injections must not trip these.
     "C1": 0,  # required columns are always present

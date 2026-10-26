@@ -134,6 +134,21 @@ Unknown keys and unknown check names are errors (exit 2), so a typo can't silent
 
 All numbers are finite, so the file is strict JSON.
 
+## Description parsing
+
+`product_description` states the product, distance and duration of a trip in several templates; `parse.py` reads them into four derived columns, each null on a line that is not a trip (`Increase Tip`, `Earnings`, `Subscription`, a null) and never 0 there. A trip that states zero is 0.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `distance_mi` | Float64 | distance in miles; kilometres are converted (x 0.621371) |
+| `distance_unit` | Enum `mi`, `km` | the unit the description states (`miles` is `mi`; `kilometers` and `kilometres` are `km`) |
+| `duration_s` | Int64 | duration in seconds |
+| `product_family` | Enum | `uberx`, `lyft_standard`, `shared` (pool, shared, line), `express_pool`, `xl`, `black_lux` (black, lux, SUV, premier), `comfort` (select, plus, comfort), `vip`, `other` |
+
+Templates: Lyft `Lyft fare (1.63mi, 12m 23s)` (also `45s` and `1h 2m 3s`) and `Base fare ... 7.06 mi` lines; Uber `UberX 9.93 mi | 32 min` (also `| 1 h 22 min`, `km`); older Uber `2.00 miles   00:15:14 Trip time   uberX Car`. The family comes from the product label, first match in this order: express, shared, vip, black/lux, xl, comfort, uberx, lyft; a trip with none (a Lyft `Base fare` line) is `other`. Like the other derived columns they are computed once per run and are not in the output Parquet (#22).
+
+`description_parse_coverage` (PC1, warn) takes the ride and tip-update rows that are not superseded and passes while every merchant parses at least 98% of them (distance and duration both read). Its metric is the worst merchant's unparsed rate, and its details hold per-merchant `rows`, `parsed` and `coverage`, the unit counts, the family counts by merchant and the ten most common unparsed shapes (digits shown as `#`, never the text). The report's "Description parsing" section shows them.
+
 ## Package layout
 
 ```text
@@ -143,7 +158,7 @@ src/rideshare_data_pipeline/
   cli.py              the rideshare-qc command (argparse, `run` subcommand): summary, check lines, reports, Parquet output, exit codes
   config.py           QCConfig and CheckOverride, TOML loading (tomllib), applying overrides to rules and results
   dedupe.py           the dedupe policy: supersede_flags, deduplicated
-  parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag
+  parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag, distance, duration, unit, product family
   report.py           report.json and report.md rendering, samples/<check>.parquet, exit-code policy
   report.schema.json  JSON Schema for report.json (package data)
   schema.py           the 33 expected columns, the raw all-String schema, the casts and their formats
@@ -158,13 +173,14 @@ src/rideshare_data_pipeline/
     arithmetic.py     row rules: non_negative_total (A1)
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
+    parsing.py        description_parse_coverage (PC1)
     structural.py     all-null and constant columns (one lazy select), duplicate rows,
                       and their DatasetCheck wrappers
 tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
   test_schema.py  test_io.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
-  test_config.py  test_report.py  test_parse.py
+  test_config.py  test_report.py  test_parse.py  test_trip_parse.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```
 
