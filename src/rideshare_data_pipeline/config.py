@@ -46,6 +46,7 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "dedupe_key_unique",
     "cross_panelist_duplicates",
     "near_duplicate_rides",
+    "description_parse_coverage",
 )
 
 # `fail_on` can only be a gating severity: info checks never gate.

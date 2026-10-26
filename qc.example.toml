@@ -69,3 +69,8 @@ enabled = true
 max_failed_rate = 0.0
 severity = "warn"
 enabled = true
+
+[checks.description_parse_coverage]  # PC1: unparsed rate of ride descriptions, worst merchant (max 2%)
+max_failed_rate = 0.02
+severity = "warn"
+enabled = true

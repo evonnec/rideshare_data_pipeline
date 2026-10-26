@@ -13,7 +13,13 @@ from collections.abc import Iterable, Sequence
 
 lazy import polars as pl
 
-from rideshare_data_pipeline.checks import arithmetic, kinds, structural, uniqueness
+from rideshare_data_pipeline.checks import (
+    arithmetic,
+    kinds,
+    parsing,
+    structural,
+    uniqueness,
+)
 from rideshare_data_pipeline.checks.model import (
     SAMPLE_LIMIT,
     CheckResult,
@@ -42,6 +48,7 @@ def default_dataset_checks() -> tuple[DatasetCheck, ...]:
         *structural.dataset_checks(),
         *kinds.dataset_checks(),
         *uniqueness.dataset_checks(),
+        *parsing.dataset_checks(),
     )
 
 

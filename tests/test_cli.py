@@ -169,6 +169,7 @@ def test_csv_end_to_end(
         "dedupe_key_unique",
         "cross_panelist_duplicates",
         "near_duplicate_rides",
+        "description_parse_coverage",
     ]
     assert all(line.split()[1] == "PASS" for line in check_lines)
     found = summary(stdout)
