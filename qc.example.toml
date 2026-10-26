@@ -14,7 +14,7 @@ max_failed_rate = 0.0
 severity = "error"
 enabled = true
 
-[checks.non_negative_total]  # A1: order_total_amount >= 0
+[checks.non_negative_total]  # A1: order_total_amount >= 0 (rider-spend receipts only)
 max_failed_rate = 0.0
 severity = "error"
 enabled = true
@@ -22,6 +22,11 @@ enabled = true
 [checks.checksum_unique]     # U1: checksum is unique
 max_failed_rate = 0.0
 severity = "error"
+enabled = true
+
+[checks.category_mismatch]   # V2: category 'Travel' on a food order, freight, rental or driver earnings
+max_failed_rate = 0.0
+severity = "warn"
 enabled = true
 
 [checks.all_null_columns]    # S4: columns that are null in every row (info, no threshold)
@@ -35,4 +40,12 @@ enabled = true
 [checks.duplicate_rows]      # U0: exact duplicate rows
 max_failed_rate = 0.0
 severity = "error"
+enabled = true
+
+[checks.receipt_kinds]       # K1: receipt kind composition (info, no threshold)
+severity = "info"
+enabled = true
+
+[checks.unclassified_subject_templates]  # K2: rows no kind rule matched (info, no threshold)
+severity = "info"
 enabled = true

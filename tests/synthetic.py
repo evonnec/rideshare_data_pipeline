@@ -58,7 +58,8 @@ def synthetic_row(i: int) -> Row:
         "digital_transaction": "0",
         "checksum": hashlib.md5(f"synthetic-row-{i}".encode()).hexdigest(),
         "product_reseller": f"reseller {i}",
-        "product_category": "Travel",
+        # Not "Travel": these rows aren't receipt kinds that category could mismatch.
+        "product_category": "Receipts",
         "order_discount": f"0.{i:02d}",
         "SKU": "",
         "item_id": "",

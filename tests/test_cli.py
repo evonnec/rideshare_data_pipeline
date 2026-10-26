@@ -159,9 +159,12 @@ def test_csv_end_to_end(
         "cast_failures",
         "non_negative_total",
         "checksum_unique",
+        "category_mismatch",
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
+        "receipt_kinds",
+        "unclassified_subject_templates",
     ]
     assert all(line.split()[1] == "PASS" for line in check_lines)
     found = summary(stdout)

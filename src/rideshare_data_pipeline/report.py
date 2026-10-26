@@ -13,6 +13,7 @@ from pathlib import Path
 
 from rideshare_data_pipeline.checks.model import CheckResult, Frame, Severity
 from rideshare_data_pipeline.config import QCConfig
+from rideshare_data_pipeline.parse import KINDS
 
 SCHEMA_VERSION = 1
 SAMPLES_DIR = "samples"
@@ -100,6 +101,39 @@ def _clean(value: object) -> object:
     return str(value)
 
 
+def composition(results: Sequence[CheckResult]) -> Json | None:
+    """The merchant x kind composition, from the ``receipt_kinds`` result.
+
+    None when that check didn't run (it was disabled). Otherwise::
+
+        {"rows": N, "merchants": [...],
+         "kinds": [{"kind", "rider_spend", "total", "by_merchant": {m: n}}]}
+
+    with every kind in the canonical order, including those with no rows.
+    """
+    for r in results:
+        if r.name != "receipt_kinds":
+            continue
+        by_merchant = r.details.get("by_merchant")
+        spend = r.details.get("rider_spend_kinds")
+        if not isinstance(by_merchant, Mapping) or not isinstance(spend, list):
+            return None
+        merchants = [str(m) for m in by_merchant]
+        kinds: list[Json] = []
+        for kind in KINDS:
+            per = {m: int(by_merchant[m].get(kind, 0)) for m in merchants}
+            kinds.append(
+                {
+                    "kind": kind,
+                    "rider_spend": kind in spend,
+                    "total": sum(per.values()),
+                    "by_merchant": per,
+                }
+            )
+        return {"rows": r.n_evaluated, "merchants": merchants, "kinds": kinds}
+    return None
+
+
 def _check_json(result: CheckResult) -> Json:
     return {
         "name": result.name,
@@ -119,7 +153,7 @@ def _check_json(result: CheckResult) -> Json:
 
 def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Json:
     """Assemble the report.json document (see report.schema.json)."""
-    return {
+    report: Json = {
         "schema_version": SCHEMA_VERSION,
         "run": {
             "tool_version": run.tool_version,
@@ -150,6 +184,10 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
         "checks": [_check_json(r) for r in results],
         "exit_code": code,
     }
+    table = composition(results)
+    if table is not None:
+        report["composition"] = table
+    return report
 
 
 def _cell(value: object) -> str:
@@ -203,6 +241,39 @@ def _sample_table(sample: Frame, limit: int) -> list[str]:
     return _table(head.columns, rows)
 
 
+def _composition_table(results: Sequence[CheckResult]) -> list[str]:
+    """The "Composition by receipt kind" section body: merchant columns and a total."""
+    table = composition(results)
+    if table is None:
+        return ["_Not available: the receipt_kinds check is disabled._", ""]
+    merchants = table["merchants"]
+    kinds = table["kinds"]
+    assert isinstance(merchants, list)
+    assert isinstance(kinds, list)
+    rows = [
+        [
+            k["kind"],
+            "yes" if k["rider_spend"] else "no",
+            *(f"{k['by_merchant'][m]:,}" for m in merchants),
+            f"{k['total']:,}",
+        ]
+        for k in kinds
+    ]
+    totals = [sum(k["by_merchant"][m] for k in kinds) for m in merchants]
+    rows.append(["**total**", "", *(f"{n:,}" for n in totals), f"{sum(totals):,}"])
+    return [
+        "Rider spend: ride, tip_update, fare_correction and cancel_noshow; the other "
+        "kinds stay in the data but are left out of spend.",
+        "",
+        *_table(
+            ["kind", "rider spend", *merchants, "total"],
+            rows,
+            right=range(2, len(merchants) + 3),
+        ),
+        "",
+    ]
+
+
 def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> str:
     """Render the report as Markdown."""
     s = summarize(results)
@@ -237,13 +308,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
         ],
         right=(3, 4, 5),
     )
-    out += [
-        "",
-        "## Composition by receipt kind",
-        "",
-        "_Added by a later check (receipt kinds)._",
-        "",
-    ]
+    out += ["", "## Composition by receipt kind", ""]
+    out += _composition_table(results)
     out += ["## Column profile", ""]
     all_null = _columns(results, "all_null_columns")
     constant = _columns(results, "constant_columns")

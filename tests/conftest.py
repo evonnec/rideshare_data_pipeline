@@ -12,6 +12,8 @@ import pytest
 from fixtures.make_synthetic import build_synthetic, write_synthetic_csv
 from synthetic import synthetic_rows, write_csv_text
 
+from rideshare_data_pipeline.parse import derived_columns
+
 
 @pytest.fixture
 def synthetic_csv(tmp_path: Path) -> Path:
@@ -29,3 +31,9 @@ def full_synthetic_csv(tmp_path: Path) -> Path:
 def full_synthetic_frame() -> pl.DataFrame:
     """The same data as a typed frame (treat it as read-only)."""
     return build_synthetic()
+
+
+@pytest.fixture(scope="session")
+def full_synthetic_derived(full_synthetic_frame: pl.DataFrame) -> pl.DataFrame:
+    """The typed frame plus the derived columns, as the checks see it."""
+    return full_synthetic_frame.with_columns(derived_columns())

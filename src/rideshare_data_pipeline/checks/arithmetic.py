@@ -1,4 +1,7 @@
-"""Arithmetic checks: relations between a receipt's money columns."""
+"""Arithmetic checks: relations between a receipt's money columns.
+
+They run on the frame with the derived columns of ``parse.derived_columns()``.
+"""
 
 lazy import polars as pl
 
@@ -13,7 +16,10 @@ def rules() -> tuple[RowRule, ...]:
             check_id="A1",
             category="arithmetic",
             severity=Severity.ERROR,
-            rule="order_total_amount >= 0",
+            rule="order_total_amount >= 0 on rider-spend receipts",
             predicate=pl.col("order_total_amount") < 0,
+            # A refund on a bike, pass or other non-ride receipt is not a rider-spend
+            # error (on the real file every negative total is a bike or scooter).
+            applies_to=pl.col("is_rider_spend"),
         ),
     )

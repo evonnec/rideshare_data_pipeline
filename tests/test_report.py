@@ -14,6 +14,7 @@ from rideshare_data_pipeline import __version__
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
 from rideshare_data_pipeline.cli import main
 from rideshare_data_pipeline.config import QCConfig
+from rideshare_data_pipeline.parse import KINDS, RIDER_SPEND_KINDS
 from rideshare_data_pipeline.report import (
     RunInfo,
     exit_code,
@@ -24,7 +25,8 @@ from rideshare_data_pipeline.report import (
     summarize,
 )
 
-IMPLEMENTED = ("S2", "A1", "U1", "S4", "S5", "U0")
+IMPLEMENTED = ("S2", "A1", "U1", "S4", "S5", "U0", "V2")
+LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n"
 
 
 def run_cli(csv: Path, out: Path, *extra: str, config: str | None = None) -> int:
@@ -97,7 +99,8 @@ def test_run_writes_reports_and_samples(
     assert (out / "report.md").is_file()
     assert (out / "synthetic.parquet").is_file()
     assert sorted(p.name for p in (out / "samples").iterdir()) == [
-        "non_negative_total.parquet"
+        "category_mismatch.parquet",
+        "non_negative_total.parquet",
     ]
     sample = pl.read_parquet(out / "samples" / "non_negative_total.parquet")
     assert sample.height == MANIFEST["A1"]
@@ -110,7 +113,7 @@ def test_rerun_removes_samples_of_checks_that_now_pass(
     out = tmp_path / "out"
     assert run_cli(full_synthetic_csv, out) == 1
     assert (out / "samples" / "non_negative_total.parquet").is_file()
-    passing = "[checks.non_negative_total]\nmax_failed_rate = 0.01\n"
+    passing = "[checks.non_negative_total]\nmax_failed_rate = 0.01\n" + LOOSE_V2
     assert run_cli(full_synthetic_csv, out, config=passing) == 0
     assert list((out / "samples").glob("*.parquet")) == []
 
@@ -134,16 +137,18 @@ def test_report_json_content_matches_the_manifest(
     checks = report["checks"]
     assert isinstance(checks, list)
     assert {c["check_id"]: c["n_failed"] for c in checks} == {
-        k: MANIFEST[k] for k in IMPLEMENTED
+        **{k: MANIFEST[k] for k in IMPLEMENTED},
+        "K1": MANIFEST["K1.non_spend"],
+        "K2": 0,
     }
     assert report["schema_version"] == 1
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 0,
-        "info": 2,
-        "passed": 5,
-        "total": 6,
+        "warnings_failed": 1,
+        "info": 4,
+        "passed": 7,
+        "total": 9,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -156,7 +161,7 @@ def test_report_json_content_matches_the_manifest(
     assert run["input_name"] == "synthetic.csv"
     assert str(tmp_path) not in json.dumps(report)  # no local path leaks
     assert run["tool_version"] == __version__
-    assert run["rows"] == 292
+    assert run["rows"] == 293
     assert (
         run["panelists"]
         == pl.read_parquet(out / "synthetic.parquet")["user_id"].n_unique()
@@ -188,6 +193,88 @@ def test_report_markdown_layout(full_synthetic_csv: Path, tmp_path: Path) -> Non
         assert heading in lines
 
 
+# --- composition by receipt kind -----------------------------------------------
+
+
+def test_composition_in_json_and_markdown(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    report = load(out)
+    schema = json.loads(schema_text())
+    jsonschema.validate(report, schema, cls=jsonschema.Draft202012Validator)
+    assert report["schema_version"] == 1
+
+    table = report["composition"]
+    assert isinstance(table, dict)
+    assert table["merchants"] == ["Lyft", "Uber"]
+    kinds = {k["kind"]: k for k in table["kinds"]}
+    assert list(kinds) == list(KINDS)  # canonical order, zero rows included
+    assert table["rows"] == sum(k["total"] for k in kinds.values())
+    expected = {
+        "ride": MANIFEST["K1.ride"],
+        "tip_update": MANIFEST["K1.tip_update"],
+        "driver_earnings": MANIFEST["K1.driver_earnings"],
+        "pass_or_credit": MANIFEST["K1.pass"],
+        "micromobility": MANIFEST["K1.micromobility"],
+        "food_order": MANIFEST["K1.food_order"],
+        "freight": MANIFEST["K1.freight"],
+    }
+    assert {k: v["total"] for k, v in kinds.items() if v["total"]} == expected
+    assert {k for k, v in kinds.items() if v["rider_spend"]} == RIDER_SPEND_KINDS
+    for kind in kinds.values():
+        assert sum(kind["by_merchant"].values()) == kind["total"]
+    assert kinds["driver_earnings"]["by_merchant"] == {"Lyft": 1, "Uber": 0}
+
+    lines = (out / "report.md").read_text(encoding="utf-8").splitlines()
+    start = lines.index("## Composition by receipt kind")
+    section = lines[start : lines.index("## Column profile")]
+    assert "| kind | rider spend | Lyft | Uber | total |" in section
+    assert "| driver_earnings | no | 1 | 0 | 1 |" in section
+    assert "| food_order | no | 0 | 2 | 2 |" in section
+    assert (
+        "| ride | yes | "
+        + "".join(
+            f"{n:,} | "
+            for n in (
+                kinds["ride"]["by_merchant"]["Lyft"],
+                kinds["ride"]["by_merchant"]["Uber"],
+            )
+        )
+        + f"{MANIFEST['K1.ride']:,} |"
+        in section
+    )
+    assert "| **total** |  | " in "\n".join(section)
+    assert section[-2].endswith(f"| {table['rows']:,} |")
+
+
+def test_composition_is_omitted_when_the_check_is_disabled(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out, config="[checks.receipt_kinds]\nenabled = false\n")
+    report = load(out)
+    assert "composition" not in report
+    jsonschema.validate(report, json.loads(schema_text()))
+    assert "_Not available: the receipt_kinds check is disabled._" in (
+        out / "report.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_schema_rejects_unknown_composition_keys(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    report = load(out)
+    composition = report["composition"]
+    assert isinstance(composition, dict)
+    composition["extra"] = 1
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(report, json.loads(schema_text()))
+
+
 # --- thresholds, severities, enabled -------------------------------------------
 
 
@@ -195,7 +282,7 @@ def test_threshold_override_makes_the_check_pass_and_shows_in_the_report(
     full_synthetic_csv: Path, tmp_path: Path
 ) -> None:
     out = tmp_path / "out"
-    config = "[checks.non_negative_total]\nmax_failed_rate = 0.01\n"
+    config = "[checks.non_negative_total]\nmax_failed_rate = 0.01\n" + LOOSE_V2
     assert run_cli(full_synthetic_csv, out, config=config) == 0
     report = load(out)
     a1 = checks_by_name(report)["non_negative_total"]
@@ -204,7 +291,7 @@ def test_threshold_override_makes_the_check_pass_and_shows_in_the_report(
     assert isinstance(run, dict)
     assert run["config"]["checks"]["non_negative_total"]["threshold"] == 0.01
     assert not (out / "samples").exists()
-    assert "| non_negative_total | error | PASS | 1 | 0.3425% | 0.01 |" in (
+    assert "| non_negative_total | error | PASS | 1 | 0.3509% | 0.01 |" in (
         out / "report.md"
     ).read_text(encoding="utf-8")
 
@@ -213,7 +300,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 1  # type: ignore[index]
+    assert report["summary"]["warnings_failed"] == 2  # type: ignore[index]  # A1 and V2
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
@@ -240,7 +327,10 @@ def test_cli_fail_on_overrides_the_config(
 
 
 def test_info_checks_never_gate(full_synthetic_csv: Path, tmp_path: Path) -> None:
-    config = '[checks.non_negative_total]\nseverity = "info"\n'
+    config = (
+        '[checks.non_negative_total]\nseverity = "info"\n'
+        '[checks.category_mismatch]\nseverity = "info"\n'
+    )
     assert (
         run_cli(full_synthetic_csv, tmp_path / "a", "--fail-on", "warn", config=config)
         == 0
@@ -251,11 +341,13 @@ def test_disabled_check_is_removed(full_synthetic_csv: Path, tmp_path: Path) -> 
     out = tmp_path / "out"
     config = (
         "[checks.non_negative_total]\nenabled = false\n"
+        "[checks.category_mismatch]\nenabled = false\n"
         "[checks.duplicate_rows]\nenabled = false\n"
     )
     assert run_cli(full_synthetic_csv, out, config=config) == 0
     names = set(checks_by_name(load(out)))
     assert "non_negative_total" not in names
+    assert "category_mismatch" not in names
     assert "duplicate_rows" not in names
     assert "checksum_unique" in names
     assert not (out / "samples").exists()

@@ -32,6 +32,7 @@ file order). That label is not a CSV column.
     discount_gt_subtotal              1  order_discount > order_subtotal
     tax_gt_total                      1  order_tax > order_total_amount
     zero_fare_ride                    1  a ride with total 0
+    negative_total_ride               1  a car ride with a negative total (A1)
     zero_duration_trip                1  a 2-mile Lyft ride lasting 0 s
     implausible_speed                 1  60 miles in 20 minutes
     fare_outlier_10x                  1  fare at 10x the typical $/mile and $/min
@@ -76,7 +77,11 @@ SEED = 20190301
 MANIFEST: dict[str, int] = {
     # --- implemented now (asserted in tests/test_synthetic.py) -----------------
     "S2": 0,  # no value fails its cast
-    "A1": 1,  # bike: total -4.50
+    # A1 applies to rider-spend receipts only: the bike's -4.50 (a non-spend kind) is
+    # not counted. The injected negative car ride is, and it is the only A1 failure.
+    # Later checks must not count it twice: A3 (zero fare) means exactly 0, and the
+    # fare-outlier checks (O4) must skip non-positive totals, which A1 owns.
+    "A1": 1,  # negative_total_ride: total -5.75
     "U0": 0,  # no exact duplicate row (checksums differ, so even pairs differ)
     "U1": 0,  # checksum is md5 of the row position
     "S4": 5,  # order_points, order_shipping, SKU, item_id, file_id
@@ -97,6 +102,7 @@ MANIFEST: dict[str, int] = {
     "K1.food_order": 2,  # food_orders
     "K1.freight": 1,  # freight
     "K1.tip_update": 1,  # ride_tip_update (the updated receipt)
+    "K1.ride": 284,  # every other row: baseline, injected rides, masked subjects
     "K1.non_spend": 8,  # earnings 1 + pass 3 + bike 1 + food 2 + freight 1
     "V2": 4,  # category 'Travel' on earnings 1 + food 2 + freight 1
     "V3": 1,  # freight sender is person-like
@@ -586,6 +592,21 @@ def _zero_fare_ride(g: _Generator, user: int) -> list[Row]:
     ]
 
 
+def _negative_total_ride(g: _Generator, user: int) -> list[Row]:
+    # An ordinary ride whose total is negative (a refunded fare): the one A1 failure.
+    return [
+        g.uber_trip(
+            user,
+            date(2019, 4, 28),
+            3.6,
+            _typical_secs(3.6),
+            order_total_amount="-5.75",
+            order_subtotal="-5.75",
+            item_price="-5.75",
+        )
+    ]
+
+
 def _zero_duration_trip(g: _Generator, user: int) -> list[Row]:
     return [g.lyft_trip(user, datetime(2019, 4, 23, 11, 5), 2.0, 0)]
 
@@ -680,6 +701,7 @@ _BLOCKS: tuple[tuple[str, Callable[[_Generator, int], list[Row]], int], ...] = (
     ("discount_gt_subtotal", _discount_gt_subtotal, 1),
     ("tax_gt_total", _tax_gt_total, 1),
     ("zero_fare_ride", _zero_fare_ride, 1),
+    ("negative_total_ride", _negative_total_ride, 1),
     ("zero_duration_trip", _zero_duration_trip, 1),
     ("implausible_speed", _implausible_speed, 1),
     ("fare_outlier_10x", _fare_outlier_10x, 1),

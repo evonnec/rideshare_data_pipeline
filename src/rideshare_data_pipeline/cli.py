@@ -29,6 +29,7 @@ from rideshare_data_pipeline.io import (
     read_typed,
     write_parquet,
 )
+from rideshare_data_pipeline.parse import with_derived
 from rideshare_data_pipeline.report import (
     RunInfo,
     Written,
@@ -183,11 +184,14 @@ def run(
         df, facts = read_typed(csv_path)
     # read_typed raises CastError on any cast failure, so reaching here means there
     # were none; recording that keeps the S2 line in the report.
+    # The derived columns (receipt kind, profile, rider-spend flag) are computed
+    # once; the checks read them, and the Parquet keeps only the input's columns.
+    enriched = with_derived(df)
     results = configure_results(
         [
             cast_failures_check(dict.fromkeys(casts(), 0)),
             *run_checks(
-                df.lazy(),
+                enriched.lazy(),
                 rules=configure_rules(default_rules(), config),
                 sample_limit=config.sample_limit,
             ),
@@ -278,7 +282,7 @@ def format_check(result: CheckResult) -> str:
     rate = "n/a" if result.metric is None else f"{result.metric:.4%}"
     return (
         f"{result.severity.value:<5}  {'PASS' if result.passed else 'FAIL'}  "
-        f"{result.name:<20}  {result.n_failed:>9,}/{result.n_evaluated:<9,}  {rate:>9}"
+        f"{result.name:<30}  {result.n_failed:>9,}/{result.n_evaluated:<9,}  {rate:>9}"
     )
 
 
