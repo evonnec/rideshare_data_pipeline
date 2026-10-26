@@ -4,8 +4,8 @@ Why not a z-score or a Tukey fence
 ==================================
 
 Fares are heavy-tailed (roughly log-normal) and depend on distance and product. A raw
-z-score or a Tukey fence on the fare flags 1-3% of rows, and about 99.7% of the high
-ones have a normal price per mile: they are long trips. So the checks here
+z-score or a Tukey fence on the fare flags a few percent of rows, and nearly all of the
+high ones have a normal price per mile: they are long trips. So the checks here
 
 1. **score within a segment** (merchant x product family): an UberX and a Black car
    have different baselines;
@@ -18,9 +18,9 @@ ones have a normal price per mile: they are long trips. So the checks here
 
 A threshold ``k`` is a review budget (how many rows you are willing to look at), not
 a false-positive rate: the report shows the flag rate at k in {3, 3.5, 4, 5}. There is
-no machine learning on purpose: an isolation forest was tried and flagged different
-rows from these (36 of 1,000 flags overlapped), without a reason to read for any of
-them; a z-score on a log scale says why a row was flagged.
+no machine learning on purpose: an isolation forest was tried and flagged mostly
+different rows from these, without a reason to read for any of them; a z-score
+on a log scale says why a row was flagged.
 
 The checks
 ==========
@@ -122,7 +122,7 @@ def robust_z(
     `min_group` non-null values. For a log scale pass ``log_positive(x)``.
 
     As one expression it computes each group median twice; ``score`` stages the same
-    parts as columns instead (2.6x faster on 1.7M rows, where it matters).
+    parts as columns instead (about 2.6x faster at a ~2M-row scale, where it matters).
     """
     median = x.median().over(by)
     scale = MAD_SCALE * (x - median).abs().median().over(by)

@@ -43,10 +43,9 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 
 # C2: the most a ride's field may be null, as a rate among rides that are not
 # superseded. A ride without a total is unusable for spend, so its limit is a
-# rounding error (0.01%, about 1 ride in 10,000), not 0: the real file has 2 such
-# rides among ~1.6M and a hard 0 would fail every run on a known blemish. The order
-# number and time may be missing a little more often (0.11% and 0.26% on the
-# real file), so they get 0.5%.
+# rounding error (0.01%, about 1 ride in 10,000), not 0: the real file has a handful
+# of such rides and a hard 0 would fail every run on a known blemish. The order
+# number and time may be missing a little more often, so they get 0.5%.
 RIDE_NULL_LIMITS: dict[str, float] = {
     "order_total_amount": 0.0001,
     "order_number": 0.005,
@@ -75,7 +74,7 @@ def _is_constant(column: str, dtype: pl.DataType) -> pl.Expr:
     For a type with a total order (numbers, text, booleans, dates and times) the
     non-null values are all equal exactly when their minimum equals their maximum,
     which is a plain scan; counting distinct values hashes every value and costs
-    about four times as much on the 1.9M-row sample. Other types (nested ones)
+    several times as much on a ~2M-row file. Other types (nested ones)
     keep the distinct count.
     """
     col = pl.col(column)

@@ -4,16 +4,16 @@ The timezone assumption (owner decision, from the evidence below)
 =================================================================
 
 ``order_time`` is the trip's **local** time (the rider's wall clock) and
-``email_time`` is **UTC**. The evidence, on the full sample: the Lyft lag
-``email_time - order_time`` is never below 4 h and peaks at 5 h and 7 h (US
-offsets, plus a few minutes for the receipt), and every row whose ``order_time``
+``email_time`` is **UTC**. The evidence, in the sample: the Lyft lag
+``email_time - order_time`` is never negative and clusters at whole-hour US
+offsets plus a few minutes for the receipt, and every row whose ``order_time``
 is after its ``email_time`` comes from a sender east of UTC (Asia-Pacific). So the
 two columns are not on one clock, and a plain ``order_time <= email_time`` is wrong.
 
 Consequence: T2 compares **dates**, with one day of tolerance. A trip at 08:00 on
 the 12th in UTC+10 is at 22:00 on the 11th UTC, so the receipt's UTC date can be
 a day *before* the local order date, never more (the offsets span at most 14 h).
-Without the tolerance 380 real rows would fail; with it none do.
+Without the tolerance some real rows would fail; with it none do.
 
 The upsert assumption
 =====================
@@ -27,7 +27,7 @@ opposite oddity (an email *after* the vendor's last update).
 Date-only ``order_time`` (T6)
 =============================
 
-Uber ``order_time`` is a date at midnight on about 99.6% of rows: the time of day was
+Uber ``order_time`` is a date at midnight on nearly every row: the time of day was
 not recorded. T6 reports the share per merchant. "Midnight" here means "time unknown":
 a polars Datetime cannot tell it from a real 00:00:00.000, and no check compares times
 of day for that reason (T2 to T4 use dates only).

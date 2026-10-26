@@ -2,9 +2,9 @@
 
 Ragged rows (a record without exactly 33 fields) are found in two steps, because
 polars pads a short row with nulls silently and has no option to raise: a
-vectorized polars pass counts commas outside quotes per line (about 0.2 s on the
-866 MB sample, no false negatives), and only if it flags a line does a quote-aware
-stdlib ``csv`` pass locate the physical line for RaggedRowError. See
+vectorized polars pass counts commas outside quotes per line (a fraction of a
+second on a ~0.9 GB file, no false negatives), and only if it flags a line does
+a quote-aware stdlib ``csv`` pass locate the physical line for RaggedRowError. See
 check_ragged_rows.
 """
 
@@ -412,7 +412,7 @@ class FileFacts:
     field is counted too."""
 
 
-# A UTF-8 pass over the 866 MB sample at this chunk size costs about a second;
+# A UTF-8 pass over a ~0.9 GB file at this chunk size costs about a second;
 # larger chunks don't help, smaller ones add per-call overhead.
 _CHUNK_BYTES = 4 * 1024 * 1024
 _BOM = b"\xef\xbb\xbf"
@@ -628,7 +628,7 @@ def _may_be_ragged(path: Path) -> bool:
     """Cheap, vectorized test: might some line not be a 33-field record?
 
     Reads each line as one string column and counts commas outside quotes in
-    polars' own multi-threaded engine (about 0.2 s on the 866 MB sample, warm),
+    polars' own multi-threaded engine (a fraction of a second on a ~0.9 GB file, warm),
     with no per-line Python. No false negatives; false positives are lines that
     legitimately span several lines, which the locator then clears.
     """
@@ -676,7 +676,7 @@ def check_ragged_rows(path: StrPath, name: str | None = None) -> None:
     """Raise RaggedRowError unless every record has exactly 33 fields.
 
     Detects cheaply and locates slowly: _may_be_ragged is a vectorized polars pass
-    that costs well under 0.3 s on the 866 MB sample; only when it flags a line
+    that costs well under a second on a ~0.9 GB file; only when it flags a line
     does the exact stdlib locator run to find the physical line number. A valid
     file with line breaks inside quoted fields also takes the slow path.
     """
@@ -700,7 +700,7 @@ def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFra
     lf = pl.scan_csv(path, infer_schema=False)
     if facts.blank_lines == 0:
         # The byte scan found no blank line, so skip a 33-column filter over
-        # every row (about 0.3 s on the full sample).
+        # every row (a few tenths of a second on a ~2M-row file).
         return lf
     # polars has no option to skip blank lines: it reads each as a row of nulls, so
     # rows with no value at all are dropped here (FileFacts.blank_lines counts
@@ -745,7 +745,7 @@ def _typed_with_failures(path: Path) -> pl.DataFrame:
     The same lazy query casts (as typed() does) and flags the values that are
     non-null raw but null after the cast (as cast_failures() counts them), so the
     file is parsed once instead of twice. The flags are bit-packed booleans (a few
-    MB for the 1.9M-row sample); the caller sums and drops them.
+    MB for a ~2M-row file); the caller sums and drops them.
     """
     lf = pl.scan_csv(path, infer_schema=False)
     return lf.with_columns(

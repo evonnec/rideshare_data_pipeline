@@ -62,8 +62,7 @@ def casts() -> dict[str, pl.DataType]:
     """Return the dtype of each column that is cast away from String, in file order.
 
     The columns left out (names, hashes, IDs, free text) stay String. Chosen by
-    profiling the full sample (~866 MB, 1.88M rows): every value converts, and
-    empty fields are null.
+    profiling the sample: every value converts, and empty fields are null.
     """
     ts = pl.Datetime("ms")  # the timestamps carry milliseconds
     money = pl.Float64()
@@ -81,9 +80,9 @@ def casts() -> dict[str, pl.DataType]:
         "order_total_qty": pl.Float64(),
         "item_quantity": pl.Float64(),
         "item_price": money,
-        "digital_transaction": pl.Int8(),  # a 0/1 flag (always 0 in the sample)
+        "digital_transaction": pl.Int8(),  # a 0/1 flag (constant in the sample)
         "order_discount": money,
-        "order_pickup": pl.Int8(),  # a small code: 0, 1, 3 or 4
+        "order_pickup": pl.Int8(),  # a small integer code
         "delivery_date": ts,
         "start_source_folder_date": pl.Date(),
         "end_source_folder_date": pl.Date(),
