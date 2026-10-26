@@ -119,6 +119,29 @@ max_failed_rate = 0.0
 severity = "warn"
 enabled = true
 
+[checks.implausible_speed]   # O1: implied speed above max_mph on trips of min_seconds or more (rides, not superseded)
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.implausible_speed.params]
+max_mph = 80.0
+min_seconds = 120.0          # shorter trips are skipped: seconds of rounding dominate their speed
+
+[checks.zero_trip_metrics]   # O2: distance or duration exactly 0 with a total above 0 (a null is not a zero)
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.extreme_trip]        # O3: distance above max_miles or duration above max_seconds
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.extreme_trip.params]
+max_miles = 100.0
+max_seconds = 10800.0        # 3 hours
+
 [checks.all_null_columns]    # S4: columns that are null in every row (info, no threshold)
 severity = "info"
 enabled = true

@@ -247,7 +247,7 @@ def run(
             row_count_band_check(df.height, config.min_rows, config.max_rows),
             *run_checks(
                 enriched.lazy(),
-                rules=configure_rules(default_rules(), config),
+                rules=configure_rules(default_rules(config.check_params()), config),
                 dataset_checks=default_dataset_checks(
                     config.check_params(), config.sample_limit
                 ),

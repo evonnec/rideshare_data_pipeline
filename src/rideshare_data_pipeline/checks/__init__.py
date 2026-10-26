@@ -19,6 +19,7 @@ from rideshare_data_pipeline.checks import (
     kinds,
     outliers,
     parsing,
+    plausibility,
     structural,
     temporal,
     uniqueness,
@@ -40,8 +41,10 @@ __all__ = [
 ]
 
 
-def default_rules() -> tuple[RowRule, ...]:
-    """Return every registered row rule."""
+def default_rules(
+    params: Mapping[str, Mapping[str, float]] | None = None,
+) -> tuple[RowRule, ...]:
+    """Return every registered row rule; `params` feeds the plausibility rules."""
     return (
         *structural.rules(),
         *arithmetic.rules(),
@@ -49,6 +52,7 @@ def default_rules() -> tuple[RowRule, ...]:
         *kinds.rules(),
         *currency.rules(),
         *temporal.rules(),
+        *plausibility.rules(params),
     )
 
 
