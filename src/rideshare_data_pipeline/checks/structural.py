@@ -18,10 +18,13 @@ from typing import NamedTuple
 lazy import polars as pl
 
 from rideshare_data_pipeline.checks.model import (
+    POSITION,
     CheckResult,
     DatasetCheck,
+    FlaggedCheck,
     RowRule,
     Severity,
+    rows_at,
 )
 from rideshare_data_pipeline.io import FileFacts
 from rideshare_data_pipeline.parse import input_columns
@@ -107,21 +110,31 @@ def constant_columns(lf: pl.LazyFrame) -> list[str]:
     return degenerate_columns(lf).constant
 
 
-def duplicate_row_count(lf: pl.LazyFrame) -> int:
-    """Count the rows that exactly repeat an earlier row; nulls compare equal.
+def duplicate_row_positions(lf: pl.LazyFrame) -> pl.Series:
+    """The positions (``POSITION``) of the rows that exactly repeat an earlier row.
 
-    This is the number of copies beyond the first of each repeated row, so three
-    identical rows count as 2. Every column takes part in the comparison.
+    Nulls compare equal. These are the copies beyond the first of each repeated
+    row, so three identical rows give 2 positions. Every column of `lf` takes part
+    in the comparison.
     """
-    if not lf.collect_schema().names():
-        return 0
+    columns = lf.collect_schema().names()
+    if not columns:
+        return pl.Series(POSITION, [], dtype=pl.UInt32)
+    key = pl.struct(columns)
     # Identical rows hash alike, so only rows whose 64-bit row hash repeats can be
     # duplicates; comparing just those exactly avoids building a full-width key
     # for every row (and a hash collision can't produce a false count).
-    candidates = lf.filter(pl.struct(pl.all()).hash().is_duplicated()).collect(
-        engine="streaming"
+    candidates = (
+        lf.with_row_index(POSITION)
+        .filter(key.hash().is_duplicated())
+        .collect(engine="streaming")
     )
-    return candidates.height - candidates.n_unique()
+    return candidates.filter(~key.is_first_distinct())[POSITION]
+
+
+def duplicate_row_count(lf: pl.LazyFrame) -> int:
+    """Count the rows that exactly repeat an earlier row (see above)."""
+    return duplicate_row_positions(lf).len()
 
 
 def _info(
@@ -202,14 +215,7 @@ def column_profile_checks() -> tuple[DatasetCheck, DatasetCheck]:
     return all_null, constant
 
 
-def duplicate_rows_check(lf: pl.LazyFrame) -> CheckResult:
-    """An error result counting exact duplicate rows (see duplicate_row_count).
-
-    n_evaluated is the row count, which costs a second (cheap) pass. Derived
-    columns (parse.derived_columns) don't take part in the comparison.
-    """
-    lf = input_columns(lf)
-    n_failed = duplicate_row_count(lf)
+def _duplicate_rows_result(lf: pl.LazyFrame, n_failed: int) -> CheckResult:
     n_rows = lf.select(pl.len()).collect(engine="streaming").item()
     return CheckResult(
         name="duplicate_rows",
@@ -222,6 +228,36 @@ def duplicate_rows_check(lf: pl.LazyFrame) -> CheckResult:
         n_failed=n_failed,
         n_evaluated=n_rows,
         predicate="no row repeats an earlier row exactly",
+    )
+
+
+def duplicate_rows_check(lf: pl.LazyFrame) -> CheckResult:
+    """An error result counting exact duplicate rows (see duplicate_row_count).
+
+    n_evaluated is the row count, which costs a second (cheap) pass. Derived
+    columns (parse.derived_columns) don't take part in the comparison.
+    """
+    lf = input_columns(lf)
+    return _duplicate_rows_result(lf, duplicate_row_count(lf))
+
+
+def duplicate_rows() -> FlaggedCheck:
+    """U0 with its row flag: every copy after the first of an exactly repeated row.
+
+    The flag sums to the check's ``n_failed``. The pair finds the rows once (the
+    check and the flag share the scan, remembered for the last frame by identity).
+    """
+    last: list[tuple[pl.LazyFrame, pl.Series]] = []
+
+    def later(lf: pl.LazyFrame) -> pl.Series:
+        if not (last and last[0][0] is lf):
+            last[:] = [(lf, duplicate_row_positions(input_columns(lf)))]
+        return last[0][1]
+
+    return FlaggedCheck(
+        "duplicate_rows",
+        lambda lf: _duplicate_rows_result(input_columns(lf), later(lf).len()),
+        lambda lf: rows_at(later(lf)),
     )
 
 
@@ -433,4 +469,9 @@ def dataset_checks() -> tuple[DatasetCheck, ...]:
     S4 and S5 share one aggregation (see column_profile_checks).
     """
     all_null, constant = column_profile_checks()
-    return (all_null, constant, duplicate_rows_check, ride_completeness_check)
+    return (
+        all_null,
+        constant,
+        duplicate_rows(),
+        ride_completeness_check,
+    )

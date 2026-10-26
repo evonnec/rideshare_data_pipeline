@@ -675,7 +675,7 @@ def test_cli_end_to_end_on_the_full_fixture(
     for name in ("cast_failures", "checksum_unique", "duplicate_rows"):
         assert lines[name][1] == "PASS"
         assert lines[name][3].startswith("0/")
-    assert pl.read_parquet(out / "synthetic.parquet").height == N_ROWS
+    assert pl.read_parquet(out / "synthetic.curated.parquet").height == N_ROWS
     report = (out / "report.md").read_text(encoding="utf-8")
     section = report.split("## Description parsing")[1].split("## Column profile")[0]
     assert "| Lyft |" in section

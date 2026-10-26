@@ -10,6 +10,8 @@ lazy import polars as pl
 from rideshare_data_pipeline.checks.model import (
     CheckResult,
     DatasetCheck,
+    FlaggedCheck,
+    Lazy,
     Severity,
 )
 from rideshare_data_pipeline.dedupe import supersede_flags
@@ -36,13 +38,8 @@ NO_MERCHANT = "(none)"
 NO_VALUE = "(none)"
 
 
-def _population(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Ride and tip-update rows that are not superseded, with ``parsed`` and shape.
-
-    The tip-update stubs (``Increase Tip``, ``Tip Increase``) are not in it.
-    """
-    if "is_superseded" not in lf.collect_schema().names():
-        lf = supersede_flags(lf)
+def _in_population() -> pl.Expr:
+    """True on the rows PC1 evaluates (see ``_population``)."""
     stub = (
         pl.col("product_description")
         .str.strip_chars()
@@ -50,15 +47,32 @@ def _population(lf: pl.LazyFrame) -> pl.LazyFrame:
         .is_in(TIP_STUBS)
         .fill_null(False)
     )
-    return lf.filter(
+    return (
         pl.col("receipt_kind").cast(pl.String).is_in(COVERAGE_KINDS)
         & ~pl.col("is_superseded")
         & ~stub
-    ).with_columns(
+    )
+
+
+def _parsed() -> pl.Expr:
+    return pl.col("distance_mi").is_not_null() & pl.col("duration_s").is_not_null()
+
+
+def unparsed_flag(_lf: Lazy) -> pl.Expr:
+    """The unparsed rows of PC1's population: the rows counted in its ``n_failed``."""
+    return (_in_population() & ~_parsed()).fill_null(False)
+
+
+def _population(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Ride and tip-update rows that are not superseded, with ``parsed`` and shape.
+
+    The tip-update stubs (``Increase Tip``, ``Tip Increase``) are not in it.
+    """
+    if "is_superseded" not in lf.collect_schema().names():
+        lf = supersede_flags(lf)
+    return lf.filter(_in_population()).with_columns(
         pl.col("merchant_name").fill_null(NO_MERCHANT).alias("merchant"),
-        (
-            pl.col("distance_mi").is_not_null() & pl.col("duration_s").is_not_null()
-        ).alias("parsed"),
+        _parsed().alias("parsed"),
     )
 
 
@@ -154,4 +168,10 @@ def description_parse_coverage_check(lf: pl.LazyFrame) -> CheckResult:
 
 def dataset_checks() -> tuple[DatasetCheck, ...]:
     """The parsing checks, for the registry."""
-    return (description_parse_coverage_check,)
+    return (
+        FlaggedCheck(
+            "description_parse_coverage",
+            description_parse_coverage_check,
+            unparsed_flag,
+        ),
+    )

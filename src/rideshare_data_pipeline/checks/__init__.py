@@ -28,15 +28,18 @@ from rideshare_data_pipeline.checks.model import (
     SAMPLE_LIMIT,
     CheckResult,
     DatasetCheck,
+    FlaggedCheck,
     RowRule,
 )
 
 __all__ = [
     "CheckResult",
     "DatasetCheck",
+    "FlaggedCheck",
     "RowRule",
     "default_dataset_checks",
     "default_rules",
+    "fails",
     "run_checks",
 ]
 
@@ -77,7 +80,7 @@ def default_dataset_checks(
     )
 
 
-def _fails(rule: RowRule, predicate: pl.Expr | None = None) -> pl.Expr:
+def fails(rule: RowRule, predicate: pl.Expr | None = None) -> pl.Expr:
     """The rows that count as failed: applicable, and the predicate is True.
 
     A null predicate means "can't tell", which is not a failure (a missing value
@@ -149,10 +152,10 @@ def run_rules(
             expr
             for i, rule in enumerate(rules)
             for expr in (
-                _fails(rule).sum().alias(f"failed_{i}"),
+                fails(rule).sum().alias(f"failed_{i}"),
                 _applies(rule).sum().alias(f"evaluated_{i}"),
                 *(
-                    _fails(rule, expr).sum().alias(f"field_{i}_{j}")
+                    fails(rule, expr).sum().alias(f"field_{i}_{j}")
                     for j, expr in enumerate(rule.breakdown.values())
                 ),
             )
@@ -182,7 +185,7 @@ def run_rules(
     present = set(lf.collect_schema().names())
     samples = pl.collect_all(
         [
-            lf.filter(_fails(rules[i]))
+            lf.filter(fails(rules[i]))
             .select(c for c in rules[i].sample_cols if c in present)
             .head(sample_limit)
             for i in failing

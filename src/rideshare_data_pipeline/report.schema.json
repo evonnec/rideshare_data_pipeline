@@ -159,10 +159,21 @@
     "outputs": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["parquet", "samples"],
+      "required": ["parquet", "curated", "samples"],
       "description": "The files this run wrote into the output directory. The directory may also hold files from other runs; only these belong to this report.",
       "properties": {
-        "parquet": { "type": ["string", "null"], "description": "File name of the Parquet, relative to the report directory." },
+        "parquet": { "type": ["string", "null"], "description": "File name of the curated Parquet, relative to the report directory (the same as curated.name)." },
+        "curated": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["name", "rows", "columns"],
+          "description": "The curated Parquet: every input row (none is dropped; dedupe is the is_superseded flag) with the typed input columns, the derived columns and the per-row QC flags. Null when none was written.",
+          "properties": {
+            "name": { "type": "string", "description": "File name, relative to the report directory." },
+            "rows": { "type": "integer", "minimum": 0, "description": "Rows written; equal to the input's row count." },
+            "columns": { "type": "integer", "minimum": 1, "description": "Columns written." }
+          }
+        },
         "samples": { "type": "array", "items": { "type": "string" }, "description": "Sample files written by this run, relative to the report directory." }
       }
     },
