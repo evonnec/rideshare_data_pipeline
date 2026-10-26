@@ -17,7 +17,7 @@ from rideshare_data_pipeline.cache import CacheStatus, derive, load_typed
 from rideshare_data_pipeline.checks import (
     default_dataset_checks,
     default_rules,
-    run_checks,
+    run_checks_evaluated,
 )
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
 from rideshare_data_pipeline.checks.structural import (
@@ -252,18 +252,19 @@ def run(
     dataset_checks = configure_dataset_checks(
         default_dataset_checks(config.check_params(), config.sample_limit), config
     )
+    checked, rule_table = run_checks_evaluated(
+        lf,
+        rules=rules,
+        dataset_checks=dataset_checks,
+        sample_limit=config.sample_limit,
+    )
     results = configure_results(
         [
             header_valid_check(facts),
             utf8_valid_check(facts),
             cast_failures_check(dict.fromkeys(casts(), 0)),
             row_count_band_check(df.height, config.min_rows, config.max_rows),
-            *run_checks(
-                lf,
-                rules=rules,
-                dataset_checks=dataset_checks,
-                sample_limit=config.sample_limit,
-            ),
+            *checked,
         ],
         config,
     )
@@ -271,7 +272,7 @@ def run(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / f"{input_stem(input_path)}.curated.parquet"
-    flags = row_flags(lf, rules, dataset_checks, results)
+    flags = row_flags(lf, rules, dataset_checks, results, rule_table)
     plan = curated_plan(lf, flag_table(lf, flags), drop_columns)
     output_columns = plan.collect_schema().len()
     write_curated(plan, output)

@@ -1,6 +1,7 @@
 """All-null, constant and duplicate-row detection (issue #7's regression tests)."""
 
 import datetime as dt
+import random
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from rideshare_data_pipeline.checks.structural import (
     constant_columns,
     degenerate_columns,
     duplicate_row_count,
+    duplicate_row_positions,
 )
 from rideshare_data_pipeline.io import read_raw, typed
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
@@ -201,3 +203,76 @@ def test_duplicate_row_count_on_the_real_layout(tmp_path: Path) -> None:
     rows = synthetic_rows(3)
     path = write_csv_text(tmp_path / "dups.csv", [*rows, rows[1], rows[1]])
     assert duplicate_row_count(typed(read_raw(path))) == 2
+
+
+# --- the faster constant and duplicate scans agree with the plain definitions ----
+
+
+def _reference_constant(series: pl.Series) -> bool:
+    """The definition: exactly one distinct non-null value."""
+    return series.drop_nulls().n_unique() == 1
+
+
+def test_constant_by_min_max_equals_the_distinct_count_on_edge_values() -> None:
+    columns: dict[str, pl.Series] = {
+        "floats_signed_zero": pl.Series([0.0, -0.0, None], dtype=pl.Float64),
+        "floats_nan_only": pl.Series([float("nan"), float("nan")]),
+        "floats_nan_mixed": pl.Series([1.0, float("nan")]),
+        "floats_inf": pl.Series([float("inf"), float("inf"), None]),
+        "ints_same": pl.Series([3, 3, None], dtype=pl.Int8),
+        "ints_two": pl.Series([3, 4, 3], dtype=pl.Int8),
+        "strings_same": pl.Series(["", "", None]),
+        "strings_empty_vs_text": pl.Series(["", "a"]),
+        "strings_case": pl.Series(["a", "A"]),
+        "bools_same": pl.Series([True, True, None]),
+        "bools_two": pl.Series([True, False]),
+        "dates_same": pl.Series([dt.date(2020, 1, 1)] * 3),
+        "datetimes_two": pl.Series(
+            [dt.datetime(2020, 1, 1), dt.datetime(2020, 1, 1, 0, 0, 1)]
+        ),
+        "all_null": pl.Series([None, None], dtype=pl.String),
+        "list_same": pl.Series([[1], [1]]),
+        "list_two": pl.Series([[1], [2]]),
+    }
+    for name, series in columns.items():
+        found = degenerate_columns(pl.LazyFrame({name: series}))
+        assert (name in found.constant) == _reference_constant(series), name
+
+
+def test_constant_by_min_max_equals_the_distinct_count_on_random_columns() -> None:
+    rng = random.Random(7)
+    pools: list[list[Any]] = [
+        [None, 0, 1, 2],
+        [None, "", "a", "b"],
+        [None, 0.0, -0.0, 1.5],
+        [None, True, False],
+    ]
+    for _ in range(300):
+        pool = rng.choice(pools)
+        values = [
+            rng.choice(pool[: rng.randint(1, len(pool))])
+            for _ in range(rng.randint(0, 6))
+        ]
+        series = pl.Series("c", values, dtype=pl.Float64 if pool is pools[2] else None)
+        found = degenerate_columns(pl.LazyFrame([series]))
+        assert ("c" in found.constant) == _reference_constant(series), values
+        assert ("c" in found.all_null) == (
+            len(values) > 0 and all(v is None for v in values)
+        ), values
+
+
+def test_duplicates_must_match_in_every_column_not_just_the_probe_columns() -> None:
+    # Same checksum, user_id and email_time, but a different amount: not a duplicate.
+    stamp = dt.datetime(2020, 1, 1)
+    frame = pl.LazyFrame(
+        {
+            "checksum": ["a", "a", "a", "b"],
+            "user_id": ["u", "u", "u", "u"],
+            "email_time": [stamp] * 4,
+            "amount": [1.0, 2.0, 1.0, 1.0],
+        }
+    )
+    assert duplicate_row_positions(frame).to_list() == [2]
+    # Without the probe columns every column is the key.
+    plain = pl.LazyFrame({"a": [1, 1, 2, None, None], "b": ["x", "x", "x", None, None]})
+    assert duplicate_row_positions(plain).to_list() == [1, 4]
