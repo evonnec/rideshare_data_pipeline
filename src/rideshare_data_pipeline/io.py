@@ -237,6 +237,22 @@ def _extract_zip_member(archive: Path, dest: Path, pattern: str) -> tuple[Path, 
     )
 
 
+def _archive_problem(err: Exception) -> str:
+    """One line for a damaged archive.
+
+    tarfile, asked to open a file that is no tar in any compression, lists every
+    method it tried (one ``ReadError`` each); that wall of text says only that the
+    file is not an archive, which is what the user needs to hear.
+    """
+    text = str(err)
+    if text.startswith("file could not be opened successfully"):
+        return (
+            "archive is truncated or corrupt: it is not a readable tar, tar.gz, "
+            "tar.bz2 or tar.xz file (damaged, cut short, or not an archive at all)"
+        )
+    return f"archive is truncated or corrupt: {_first_line(err)}"
+
+
 def extract_member_named(
     archive: StrPath, dest: StrPath, member: str = "*.csv"
 ) -> tuple[Path, str]:
@@ -255,7 +271,7 @@ def extract_member_named(
         what = (
             "encrypted zip members are not supported"
             if "encrypted" in str(err)
-            else f"archive is truncated or corrupt: {err}"
+            else f"archive is truncated or corrupt: {_first_line(err)}"
         )
         msg = f"can't extract {archive.name}: {what}"
         raise ArchiveError(msg) from err
@@ -268,7 +284,7 @@ def extract_member_named(
         lzma.LZMAError,
         NotImplementedError,
     ) as err:
-        msg = f"can't extract {archive.name}: archive is truncated or corrupt: {err}"
+        msg = f"can't extract {archive.name}: {_archive_problem(err)}"
         raise ArchiveError(msg) from err
 
 
@@ -814,6 +830,13 @@ def cast_failures(lf: pl.LazyFrame) -> dict[str, int]:
     return counts.row(0, named=True)
 
 
+def _is_cr_only(path: Path) -> bool:
+    """The file's first MiB has "\\r" line breaks and no "\\n" at all."""
+    with path.open("rb") as f:
+        head = f.read(_CHUNK_BYTES // 4)
+    return b"\r" in head and b"\n" not in head
+
+
 def _first_line(err: Exception) -> str:
     """polars errors append the query plan after the first line; keep the message."""
     return str(err).partition("\n")[0]
@@ -869,7 +892,13 @@ def read_typed(
             locate_ragged_row(
                 path, name
             )  # a precise error if a row's width is the cause
-            msg = f"can't parse {name}: {_first_line(err)}"
+            if _is_cr_only(path):
+                msg = (
+                    f"{name} uses CR-only line endings (classic Mac), which can't "
+                    "be read; convert it to LF or CRLF"
+                )
+            else:
+                msg = f"can't parse {name}: {_first_line(err)}"
             raise InputError(msg) from err
     flags = [f"{_FAILED}{col}" for col in casts()]
     sums = frame.select(pl.col(flags).sum()).row(0)

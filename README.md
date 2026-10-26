@@ -146,7 +146,7 @@ A check with numbers of its own takes a `[checks.<name>.params]` table: `k` for 
 k = 4.0                    # both |robust z| must exceed k; the report shows the effective k
 ```
 
-Unknown keys and unknown check names are errors (exit 2), so a typo can't silently do nothing. So is a param name the check doesn't know, a param that is not greater than 0, a config that leaves no check enabled, and `enabled = false` for `cast_failures`. The effective thresholds and severities are recorded in the report. A `max_failed_rate` on a dataset check (for example `duplicate_rows`) replaces its threshold and re-judges it against its measured rate.
+Unknown keys and unknown check names are errors (exit 2), so a typo can't silently do nothing. So is a param name the check doesn't know, a param that is not greater than 0, a config that leaves no check enabled besides `cast_failures` (which can't be disabled, so it doesn't count), and `enabled = false` for `cast_failures` itself. The effective thresholds and severities are recorded in the report. A `max_failed_rate` on a dataset check (for example `duplicate_rows`) replaces its threshold and re-judges it against its measured rate.
 
 ## Data handling
 
@@ -303,7 +303,7 @@ U2 is a warning because a repeated key is expected vendor behaviour that the ded
 The file has no currency column, yet receipts from non-US merchant senders state amounts in local currency, so a plain sum mixes dollars with pesos and other currencies. `from_domain` is the full sender address, and it carries the evidence. `sender.py` derives `sender_country` from public receipt-sender patterns (`uber.<country>@` to an ISO code, `receipts.<city>@` to its country with US as the default city; generic senders such as `noreply@` give null; an unknown `uber.<token>@` is `unknown`, treated as non-US). `currency_reason` is the first of:
 
 1. `non_us_sender`: `sender_country` is neither `us` nor null;
-2. `km_unit`: the description states kilometres, which a US sender's receipt does not;
+2. `km_unit`: the description states kilometres. This is a reason **for every sender, US senders included**: the cautious choice, since a distance in km is evidence of a non-US trip whoever sent the receipt;
 3. `foreign_language`: a Spanish or Portuguese subject from a sender that is not a US one (in practice a generic sender with no country).
 
 `currency_suspect` is true where there is a reason. **A Spanish or Portuguese subject from a US sender is not a currency reason**: such rows state miles and cost about the same per mile as other USD rides. The language stays findable as the info column `foreign_subject` (true for any such subject), and CUR1's `details.foreign_subject` counts the tagged rows that are not suspect. Rows are flagged, never dropped, and no exchange rate is applied.
@@ -504,7 +504,7 @@ reports/
 {"schema_version": 1,
  "run": {tool_version, input_name (base name), input_sha256, input_size_bytes, bom, line_ending,
          member (null, or for an archive: name, sha256, size_bytes, has_bom, line_ending),
-         rows, panelists (distinct user_id), window {start, end} (email_time, ISO), started, finished,
+         rows, panelists (distinct user_id), window {start, end} (email_time, naive ISO: UTC assumed, no offset), started, finished,
          elapsed_seconds, cache (hit|miss|off), blank_lines (optional),
          config {fail_on, sample_limit, checks {<name>: {threshold, severity}}}},
  "summary": {errors_failed, warnings_failed, info, passed, total},
@@ -574,10 +574,12 @@ Columns, in this order:
 | Dedupe | `is_superseded`, `is_cross_panelist_copy` | Boolean | a later version of the receipt supersedes this row; the key was seen under more than one `user_id` |
 | Spend | `is_usd_rider_spend` | Boolean | the row counts toward clean USD rider spend: rider spend, not currency-suspect, not superseded, with an amount (exactly `money.usd_rides`) |
 | Check flags | `qc_<check name>` | Boolean | **True means the row fails that check** (never null), one column per row-flagged check |
-| Severity | `qc_error`, `qc_warn` | Boolean | the row fails at least one error- (warn-) severity flag, severities as configured |
+| Severity | `qc_error`, `qc_warn` | Boolean | the row fails at least one error- (warn-) severity flag, severities as configured; per row, so they ignore `max_failed_rate` (see below) |
 | Names | `qc_flags` | List(String) | the names of the checks the row fails, in report order; an empty list, never null, on a clean row |
 
 **Which checks have a flag.** Every row rule (its predicate, ANDed with `applies_to`, a null counting as not failed: the runner's own rule, so the column sums to the check's `n_failed`), plus the dataset checks that can point at rows: `duplicate_rows` (every exact copy after the first), `duplicate_receipts` (every row of a repeated key), `cross_panelist_duplicates` (= `is_cross_panelist_copy`), `near_duplicate_rides` (the excess rows), `currency_suspect_rows` (= `currency_suspect`), `description_parse_coverage` (the unparsed rows of PC1's population) and `fare_outlier_conditional` (O4's rows, from the same cached scores). Dataset-level findings have no column: S1, S2, S3, `row_count_band`, S4, S5, K1, K2, A7, T6, `fare_outlier_univariate`, `dedupe_key_unique` and `ride_completeness`. A check that is disabled in the config has no column. The invariant `sum(qc_<name>) == n_failed` is tested for every flag.
+
+**Flags are per row; pass or fail is per rate.** A `qc_<check>` flag means *this row breaks the rule*. Whether the check passes is a different question, about the failure *rate* against the check's `max_failed_rate`. So with a loosened threshold a check can PASS in the report while its flag is still True on the failing rows, and `qc_error` and `qc_warn` follow the flags, not the verdicts: a row of a check the report calls passing can still be `qc_error`, and `~qc_error` excludes it. Filter on the flags to drop every row that breaks a rule, and read the report for whether the dataset as a whole is acceptable.
 
 **Filter recipes.** These run as written on the synthetic output above (`reports/synthetic.curated.parquet`); use your own file's path otherwise:
 
@@ -607,7 +609,7 @@ uv run pytest -m slow -s         # only the opt-in real-data run (needs RIDESHAR
 - **Synthetic fixtures.** `tests/fixtures/make_synthetic.py` is a seeded generator of about 300 made-up receipts in the real 33-column layout, with one small injection block per known data issue (duplicates, tip updates, driver payouts, food orders, a bike, freight, a non-US sender, date-only times, an implausible speed, a 10x fare and so on) on top of a clean baseline. Its `MANIFEST` gives the expected `n_failed` of every check, and `tests/test_e2e_synthetic.py` runs the whole CLI and compares each check with it, so a new check fails the suite until its expected count is decided. Other tests build small files in a temporary directory with `tests/synthetic.py`.
 - **The `slow` marker.** `tests/test_real_data.py` runs only when `RIDESHARE_QC_DATA` names a local file and is skipped otherwise (CI never sets it). It runs the file three times in fresh child processes (no cache, an empty cache, a warm cache), prints a table of wall time and peak memory, and asserts only loose properties: completion, a row count above a million, rates under loose bounds, and the time budgets. It never asserts a real value.
 - **`RIDESHARE_QC_DATA`** is the path to a local CSV or archive for that test. It is read from the environment only and never written to a file in the repository.
-- **`RIDESHARE_QC_TIME_SCALE`** (default 1.0) stretches both time budgets on a busy or slower machine; for example `RIDESHARE_QC_TIME_SCALE=1.5` allows 15 s and 3 s instead of 10 s and 2 s.
+- **`RIDESHARE_QC_TIME_SCALE`** (default 1.0) stretches both time budgets on a busy or slower machine; for example `RIDESHARE_QC_TIME_SCALE=1.5` allows 15 s and 4.5 s instead of 10 s and 3 s.
 
   ```sh
   RIDESHARE_QC_DATA=/path/to/receipts.csv RIDESHARE_QC_TIME_SCALE=1.5 uv run pytest -m slow -s
@@ -627,7 +629,7 @@ What makes it fast:
 - **Derived columns are cached** next to the typed frame (see [Cache](#cache)).
 - **A lazy Parquet sink** writes the curated dataset without copying the frame.
 
-A hit on the cache skips the byte scan and the parse. The opt-in slow test asserts a budget of 10 s from the CSV and 2 s from a warm cache on an otherwise idle laptop (stretch it with `RIDESHARE_QC_TIME_SCALE`; see [Testing](#testing)).
+A hit on the cache skips the byte scan and the parse. The opt-in slow test asserts a budget of 10 s from the CSV and 3 s from a warm cache on an otherwise idle laptop (stretch it with `RIDESHARE_QC_TIME_SCALE`; see [Testing](#testing)).
 
 ## Assumptions and limitations
 

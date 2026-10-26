@@ -16,10 +16,11 @@ The TOML file has four top-level keys and one table per check::
     k = 4.0  # both |robust z| of $/mile and $/minute must exceed this
 
 Unknown keys or check names are errors (ConfigError, exit status 2), so a typo
-can't silently do nothing. So is a config that leaves no check enabled, and
-``enabled = false`` for ``cast_failures``: that check records that the strict parse
-passed (a value that doesn't convert aborts the run with exit 2 before any check
-runs), so switching it off would change nothing but the report.
+can't silently do nothing. So is a config that leaves no check enabled
+besides ``cast_failures``, and ``enabled = false`` for ``cast_failures`` itself:
+that check records that the strict parse passed (a value that doesn't convert
+aborts the run with exit 2 before any check runs), so switching it off would
+change nothing but the report.
 
 Everything here is pure; ``load_config`` is the only
 function that touches the file system.
@@ -257,8 +258,13 @@ def parse_config(data: Mapping[str, object]) -> QCConfig:
         for name, table in tables.items()
         if isinstance(table, dict) and table.get("enabled", True) is False
     }
-    if not set(KNOWN_CHECKS) - off:
-        msg = "checks: every check is disabled; at least one must stay enabled"
+    # cast_failures can't be disabled (and only records that the strict parse
+    # passed), so it doesn't count as a check left enabled.
+    if not set(KNOWN_CHECKS) - off - {"cast_failures"}:
+        msg = (
+            "checks: every check but cast_failures is disabled; at least one other "
+            "check must stay enabled"
+        )
         raise ConfigError(msg)
     return QCConfig(
         sample_limit=limit,

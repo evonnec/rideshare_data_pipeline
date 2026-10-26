@@ -21,6 +21,7 @@ from rideshare_data_pipeline.io import (
     read_typed,
 )
 from rideshare_data_pipeline.money import _STEP_LABELS, spend_waterfall
+from rideshare_data_pipeline.report import schema_text
 
 COMMAS = "," * 32 + "\r\n"
 
@@ -188,3 +189,130 @@ def test_a_failed_run_does_not_touch_an_earlier_runs_outputs(tmp_path: Path) -> 
     bad = _overflow_csv(tmp_path)
     assert main(["run", "--input", str(bad), "--out", str(out)]) == EXIT_INPUT_ERROR
     assert {f: (out / f).read_bytes() for f in _files(out)} == before
+
+
+# --- N5: a row flag says the row breaks the rule; the verdict is about the rate ------
+
+
+def test_a_flag_stays_true_when_a_loosened_threshold_lets_the_check_pass(
+    tmp_path: Path,
+) -> None:
+    rows = synthetic_rows(6, order_total_amount={0: "-5.00"})
+    for row in rows:  # rides, so the rider-spend rule applies
+        row["email_subject"] = "Your Monday evening trip with Sam"
+        row["product_reseller"] = ""
+        row["product_subtitle"] = ""
+        row["order_pickup"] = "0"
+    path = write_csv_text(tmp_path / "in.csv", rows)
+    config = tmp_path / "loose.toml"
+    config.write_text(
+        "[checks.non_negative_total]\nmax_failed_rate = 0.5\nseverity = 'error'\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    main(["run", "--input", str(path), "--out", str(out), "--config", str(config)])
+    check = _checks(out)["non_negative_total"]
+    assert check["passed"] is True  # 1 of 6 is within the 0.5 threshold
+    assert check["n_failed"] == 1
+    df = pl.read_parquet(out / "in.curated.parquet")
+    assert df["qc_non_negative_total"].sum() == 1
+    assert df["qc_error"].sum() == 1  # follows the flag, not the verdict
+    flagged = df.filter(pl.col("qc_non_negative_total"))
+    assert "non_negative_total" in flagged["qc_flags"][0].to_list()
+
+
+# --- wording: errors, report.md, schema, README ---------------------------------------
+
+
+def test_a_cr_only_file_gets_a_plain_message(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write_csv_text(tmp_path / "cr.csv", synthetic_rows(4))
+    path.write_bytes(path.read_bytes().replace(b"\r\n", b"\r"))
+    out = tmp_path / "out"
+    assert main(["run", "--input", str(path), "--out", str(out)]) == EXIT_INPUT_ERROR
+    err = capsys.readouterr().err
+    assert "CR-only line endings (classic Mac)" in err
+    assert "convert it to LF or CRLF" in err
+    assert "unable to find column" not in err
+    assert _files(out) == []
+
+
+@pytest.mark.parametrize("name", ["junk.tar.gz", "junk.tar.bz2", "junk.tar.xz"])
+def test_a_tiny_damaged_archive_is_one_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    path = tmp_path / name
+    path.write_bytes(b"not an archive at all")
+    assert (
+        main(["run", "--input", str(path), "--out", str(tmp_path / "o")])
+        == EXIT_INPUT_ERROR
+    )
+    err = capsys.readouterr().err.strip()
+    assert err.count("\n") == 0
+    assert "truncated or corrupt: it is not a readable" in err
+    assert "method gz" not in err
+
+
+def _report_markdown(tmp_path: Path, path: Path) -> str:
+    out = tmp_path / "out"
+    main(["run", "--input", str(path), "--out", str(out)])
+    return (out / "report.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("inserts", "line"),
+    [
+        ({2: b"\r\n"}, "1 blank line in the file dropped on reading"),
+        ({2: b"\r\n\r\n", 4: b"\r\n"}, "3 blank lines in the file dropped on reading"),
+    ],
+)
+def test_report_md_mentions_dropped_blank_lines(
+    tmp_path: Path, inserts: dict[int, bytes], line: str
+) -> None:
+    text = _report_markdown(tmp_path, _with_lines(tmp_path, 5, inserts))
+    assert line in text
+
+
+def test_report_md_is_silent_without_blank_lines(tmp_path: Path) -> None:
+    text = _report_markdown(tmp_path, _with_lines(tmp_path, 5, {}))
+    assert "blank line" not in text
+
+
+def test_the_parse_coverage_rate_carries_a_footnote(tmp_path: Path) -> None:
+    text = _report_markdown(tmp_path, _with_lines(tmp_path, 5, {}))
+    rows = [ln for ln in text.splitlines() if ln.startswith("| description_parse_")]
+    assert len(rows) == 1
+    assert rows[0].split("|")[5].strip().endswith("†")  # the rate cell
+    assert "† description_parse_coverage: the rate is the worst merchant's" in text
+    # No other row of the table is marked.
+    marked = [ln for ln in text.splitlines() if ln.startswith("|") and "†" in ln]
+    assert marked == rows
+
+
+def test_the_spend_section_labels_what_each_count_covers(tmp_path: Path) -> None:
+    rows = synthetic_rows(4, from_domain={0: "uber.mx@uber.com"})
+    text = _report_markdown(tmp_path, write_csv_text(tmp_path / "in.csv", rows))
+    assert (
+        "Currency-suspect rows WITH AN AMOUNT that would otherwise be rider spend"
+        in text
+    )
+    assert "Every currency-suspect row, by reason (rows counts all of them" in text
+
+
+def test_the_schema_describes_the_window_as_naive() -> None:
+    schema = json.loads(schema_text())
+    window = schema["properties"]["run"]["properties"]["window"]
+    assert "naive" in window["description"]
+    assert "no UTC offset" in window["description"]
+    assert schema["properties"]["schema_version"]["const"] == 1
+
+
+def test_the_readme_and_example_config_describe_the_enabled_check_rule() -> None:
+    root = Path(__file__).parent.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    example = (root / "qc.example.toml").read_text(encoding="utf-8")
+    assert "no check enabled besides `cast_failures`" in readme
+    assert "besides cast_failures" in example
+    assert "for every sender, US senders included" in readme
+    assert "Flags are per row; pass or fail is per rate" in readme

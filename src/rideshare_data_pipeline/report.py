@@ -405,6 +405,9 @@ def _money(cell: object) -> tuple[str, str]:
     return f"{cell['rows']:,}", f"{cell['amount']:,.2f}"
 
 
+_PARSE_CHECK = "description_parse_coverage"
+_WORST_MERCHANT_MARK = "†"
+
 _SPEND_LABELS = {
     "naive_total": "naive total of order_total_amount (all rows, mixed currencies)",
     "currency_suspect": "minus currency-suspect rows (local currency)",
@@ -467,7 +470,8 @@ def _spend_section(results: Sequence[CheckResult]) -> list[str]:
     ]
     n, amount = _money(table["suspect_rider_spend"])
     out += [
-        f"Currency-suspect rows that would otherwise be rider spend: {n} "
+        f"Currency-suspect rows WITH AN AMOUNT that would otherwise be rider spend "
+        f"(a part of the currency-suspect line above): {n} rows "
         f"({amount}; {table['note']}).",
         "",
     ]
@@ -477,6 +481,10 @@ def _spend_section(results: Sequence[CheckResult]) -> list[str]:
         reasons, countries = r.details.get("by_reason"), r.details.get("by_country")
         if isinstance(reasons, Mapping) and reasons:
             out += [
+                "Every currency-suspect row, by reason (rows counts all of them, "
+                "with or without an amount; the amount sums those that have one, "
+                "whatever their kind):",
+                "",
                 *_table(
                     ["currency reason", "rows", "amount (local currency)"],
                     [[k, *_money(v)] for k, v in reasons.items()],
@@ -936,6 +944,15 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
         ),
         f"rows {run.rows:,} · panelists {run.panelists:,} · window {window}",
         "",
+        *(
+            [
+                f"{run.blank_lines:,} blank line{'s' if run.blank_lines != 1 else ''} "
+                "in the file dropped on reading (not counted in rows).",
+                "",
+            ]
+            if run.blank_lines
+            else []
+        ),
         "## Summary",
         "",
         (
@@ -953,7 +970,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
                 r.severity.value,
                 "PASS" if r.passed else "FAIL",
                 f"{r.n_failed:,}",
-                metric_text(r),
+                metric_text(r)
+                + (_WORST_MERCHANT_MARK if r.name == _PARSE_CHECK else ""),
                 _num(r.threshold),
                 r.predicate,
             ]
@@ -961,6 +979,14 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
         ],
         right=(3, 4, 5),
     )
+    if any(r.name == _PARSE_CHECK for r in results):
+        out += [
+            "",
+            f"{_WORST_MERCHANT_MARK} {_PARSE_CHECK}: the rate is the worst merchant's "
+            "unparsed rate, not failed / evaluated (the failed count is over all "
+            "merchants), so the two don't divide to the rate. See Description "
+            "parsing.",
+        ]
     out += ["", "## Composition by receipt kind", ""]
     out += _composition_table(results)
     out += ["## Duplicate receipts", ""]
