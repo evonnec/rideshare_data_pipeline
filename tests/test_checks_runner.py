@@ -22,6 +22,7 @@ from rideshare_data_pipeline.checks.structural import (
     constant_columns_check,
     duplicate_rows_check,
 )
+from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.parse import derived_columns
 
 
@@ -47,7 +48,9 @@ def rule(
 
 def synthetic_frame(tmp_path: Path, n: int) -> pl.LazyFrame:
     path = write_csv_text(tmp_path / "s.csv", synthetic_rows(n))
-    return read_typed_frame(path).with_columns(derived_columns()).lazy()
+    return supersede_flags(
+        read_typed_frame(path).with_columns(derived_columns())
+    ).lazy()
 
 
 def one(r: RowRule, lf: pl.LazyFrame, **kw: Any) -> Any:
@@ -173,12 +176,17 @@ def test_registry_rules() -> None:
         "required_fields": Severity.ERROR,
         "id_formats": Severity.WARN,
         "non_negative_total": Severity.ERROR,
+        "item_price_equals_subtotal": Severity.ERROR,
+        "zero_fare_rides": Severity.WARN,
+        "discount_within_subtotal": Severity.WARN,
+        "tax_within_total": Severity.WARN,
+        "unexplained_residual": Severity.WARN,
         "checksum_unique": Severity.ERROR,
         "category_mismatch": Severity.WARN,
         "merchant_sender_consistent": Severity.ERROR,
         "unknown_sender": Severity.WARN,
     }
-    assert len(default_dataset_checks()) == 12
+    assert len(default_dataset_checks()) == 13
 
 
 def test_registered_rules_on_synthetic_data(tmp_path: Path) -> None:

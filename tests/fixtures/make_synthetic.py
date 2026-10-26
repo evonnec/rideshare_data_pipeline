@@ -160,6 +160,19 @@ MANIFEST: dict[str, int] = {
     "V1": 0,  # merchant and sender domain agree in every row
     "A2": 0,  # item_price == order_subtotal in every row
     "A6": 0,  # no unexplained residual above max(20, subtotal)
+    # A7 (info): the identity total == subtotal + tax - discount holds on a ride row
+    # when the generator left total == subtotal and added no tax or discount. A7's
+    # n_failed is the 263 rows of the 280-row USD.rides population where it holds
+    # (the other 17 do not), derived from the generator, not fudged: baseline rows
+    # with a tax (k % 40 == 7: 7 rows, total
+    # below subtotal + tax) or a promo (k % 37 == 5: 7 rows, total above subtotal -
+    # discount), the injected discount_gt_subtotal (above) and tax_gt_total (below),
+    # and the tip update (+3.50 on the total, subtotal untouched: above). So 9 above
+    # and 8 below; the other 263 hold (the negative_total_ride and zero_fare_ride
+    # included: total == subtotal). Share = 263 / 280.
+    "A7": 263,
+    "A7.above": 9,
+    "A7.below": 8,
     "T1": 0,  # insert <= update <= source_dttimestamp <= dttimestamp
     "T5": 0,  # email_time <= update_time in every row (tip update included)
 }
