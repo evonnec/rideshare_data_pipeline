@@ -28,6 +28,12 @@ rideshare-qc = "rideshare_data_pipeline.cli:main"
 requires = ["uv_build>=0.13.5,<0.14.0"]
 build-backend = "uv_build"
 
+# Files that go into the sdist only (the wheel holds the package): the tests and tools
+# let a downstream build run the suite, qc.example.toml is the documented config and
+# uv.lock pins the dev environment.
+[tool.uv.build-backend]
+source-include = ["tests/**", "tools/**", "qc.example.toml", "uv.lock"]
+
 [dependency-groups]
 dev = [
     "jsonschema>=4.26.0",
