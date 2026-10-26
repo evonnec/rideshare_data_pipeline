@@ -17,6 +17,7 @@ lazy import csv
 lazy import fnmatch
 lazy import hashlib
 lazy import lzma
+lazy import re
 lazy import shutil
 lazy import stat
 lazy import tarfile
@@ -62,12 +63,21 @@ class InputError(ValueError):
     """
 
 
+FALLBACK_STEM = "input"
+"""The output stem when the input's name has none (a file named just ".csv")."""
+
+
+def _safe_stem(stem: str) -> str:
+    """The stem without leading dots, so the output is never a hidden file."""
+    return stem.lstrip(".") or FALLBACK_STEM
+
+
 def _split_input_name(path: StrPath) -> tuple[str, InputKind]:
     """Split an input file name into its stem and kind: "a.tar.bz2" -> ("a", "tar")."""
     name = Path(path).name
     for suffix, kind in _SUFFIX_KINDS:
         if name.lower().endswith(suffix):
-            return name[: -len(suffix)] or name, kind
+            return _safe_stem(name[: -len(suffix)]), kind
     supported = ", ".join(suffix for suffix, _ in _SUFFIX_KINDS)
     msg = f"unsupported input {name!r}: expected one of {supported}"
     raise InputError(msg)
@@ -76,7 +86,9 @@ def _split_input_name(path: StrPath) -> tuple[str, InputKind]:
 def input_stem(path: StrPath) -> str:
     """Return the input's file name without its CSV or archive suffix.
 
-    "Data.csv" and "Data.tar.bz2" both give "Data". Raises InputError for a name
+    "Data.csv" and "Data.tar.bz2" both give "Data". A name with no stem (".csv") or
+    only leading dots falls back to "input", so the output file is never hidden.
+    Raises InputError for a name
     that isn't a supported input.
     """
     return _split_input_name(path)[0]
@@ -369,11 +381,21 @@ class FileFacts:
     header: tuple[str, ...]
     """The column names, as parsed from the first line (after any BOM)."""
 
+    blank_lines: int = 0
+    """Lines that are empty once any ``\\r`` is removed. They are dropped on reading
+    (read_raw), not an error. Counted from the bytes, so a blank line inside a quoted
+    field is counted too."""
+
 
 # A UTF-8 pass over the 866 MB sample at this chunk size costs about a second;
 # larger chunks don't help, smaller ones add per-call overhead.
 _CHUNK_BYTES = 4 * 1024 * 1024
 _BOM = b"\xef\xbb\xbf"
+# A "\n" that is followed, ignoring "\r"s, by another "\n": one blank line each.
+_BLANK_LINE = re.compile(rb"\n(?=\r*\n)")
+# A chunk's last "\n" and the "\r"s after it, searched for in the last few bytes.
+_TRAILING_BREAK = re.compile(rb"\n\r*\Z")
+_TAIL_BYTES = 16
 
 
 def file_sha256(path: StrPath) -> str:
@@ -394,19 +416,21 @@ def _line_ending(*, crlf: int, bare_lf: int) -> LineEnding:
 
 def _scan_bytes(
     path: Path, name: str | None = None
-) -> tuple[int, str, bool, LineEnding]:
+) -> tuple[int, str, bool, LineEnding, int]:
     """Validate the file as UTF-8 in one streaming pass and describe its bytes.
 
-    Returns the size, the SHA-256 (hex), whether it starts with a BOM, and the
-    line-ending style; the hash uses the same chunks as the validation.
+    Returns the size, the SHA-256 (hex), whether it starts with a BOM, the
+    line-ending style and the number of blank lines (empty once ``\\r`` is removed);
+    the hash uses the same chunks as the validation.
     Raises EncodingError with the absolute offset of the first invalid byte.
     """
     # An incremental decoder keeps a multi-byte sequence that straddles two chunks
     # buffered, so a chunk boundary is never mistaken for an error.
     decoder = codecs.getincrementaldecoder("utf-8")()
     digest = hashlib.sha256()
-    position = crlf = lf = 0
+    position = crlf = lf = blank = 0
     has_bom = False
+    held_back = b""
     previous_tail = b""
     with path.open("rb") as f:
         while True:
@@ -438,8 +462,16 @@ def _scan_bytes(
             lf += data.count(b"\n")
             previous_tail = chunk[-1:]
             position += len(chunk)
+            # A blank line is a "\n" followed by "\r"s and another "\n", so a run of
+            # k line breaks holds k - 1. The last "\n" of a chunk (with any "\r"s
+            # after it) is held back and put in front of the next chunk, where
+            # its lookahead can see what follows.
+            data = held_back + chunk if held_back else chunk
+            blank += len(_BLANK_LINE.findall(data))
+            held = _TRAILING_BREAK.search(data, max(0, len(data) - _TAIL_BYTES))
+            held_back = data[held.start() :] if held else b""
     ending = _line_ending(crlf=crlf, bare_lf=lf - crlf)
-    return position, digest.hexdigest(), has_bom, ending
+    return position, digest.hexdigest(), has_bom, ending, blank
 
 
 def _read_header(path: Path, name: str | None = None) -> tuple[str, ...]:
@@ -507,10 +539,10 @@ def inspect_csv(path: StrPath, name: str | None = None) -> FileFacts:
     for an empty file.
     """
     path = Path(path)
-    size, sha256, has_bom, line_ending = _scan_bytes(path, name)
+    size, sha256, has_bom, line_ending, blank_lines = _scan_bytes(path, name)
     header = _read_header(path, name)
     check_header(header)
-    return FileFacts(size, sha256, has_bom, line_ending, header)
+    return FileFacts(size, sha256, has_bom, line_ending, header, blank_lines)
 
 
 def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFrame:
@@ -527,7 +559,12 @@ def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFra
     # polars strips a BOM and accepts CRLF or LF itself. A row with too many
     # fields makes the collect fail; one with too few is padded with nulls, which
     # isn't detected (see the ragged-row check planned in the edge-case suite).
-    return pl.scan_csv(path, infer_schema=False)
+    # polars has no option to skip blank lines: it reads each as a row of nulls, so
+    # rows with no value at all are dropped here (FileFacts.blank_lines counts
+    # them). No real row is all-null: C1's required fields are never null.
+    return pl.scan_csv(path, infer_schema=False).filter(
+        pl.any_horizontal(pl.all().is_not_null())
+    )
 
 
 def typed(lf: pl.LazyFrame) -> pl.LazyFrame:
@@ -589,6 +626,32 @@ def write_csv(df: pl.DataFrame, path: StrPath) -> None:
     df.write_csv(Path(path), datetime_format=TIMESTAMP_FORMAT, date_format=DATE_FORMAT)
 
 
+@contextmanager
+def atomic_path(path: StrPath) -> Iterator[Path]:
+    """Yield a temporary path beside `path`, renamed over it if the block succeeds.
+
+    A reader never sees a half-written file, and a failed write leaves any older
+    `path` as it was and no temporary file behind.
+    """
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        yield tmp
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def write_text_atomic(path: StrPath, text: str) -> None:
+    """Write UTF-8 text to `path` atomically (see atomic_path)."""
+    with atomic_path(path) as tmp:
+        tmp.write_text(text, encoding="utf-8")
+
+
 def write_parquet(df: pl.DataFrame, path: StrPath) -> None:
-    """Write df as zstd-compressed Parquet, keeping every column and dtype."""
-    df.write_parquet(Path(path), compression="zstd")
+    """Write df as zstd-compressed Parquet, keeping every column and dtype.
+
+    Atomic (see atomic_path): an interrupted run never leaves a partial file.
+    """
+    with atomic_path(path) as tmp:
+        df.write_parquet(tmp, compression="zstd")

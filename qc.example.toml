@@ -9,6 +9,7 @@ min_rows = 1          # row_count_band: fewest rows expected (0 = no lower bound
                       # header-only file fails with the default of 1
 # max_rows = 5000000  # row_count_band: most rows expected (default: no upper bound)
 
+# At least one check must stay enabled (a config that turns every check off is an error).
 # Per check: max_failed_rate (the check passes while failed / evaluated is at most
 # this), severity ("error", "warn" or "info") and enabled (false removes the check).
 
@@ -22,10 +23,10 @@ max_failed_rate = 0.0
 severity = "error"
 enabled = true
 
-[checks.cast_failures]       # S2: columns with values that don't convert to their type
-max_failed_rate = 0.0
+[checks.cast_failures]       # S2: a record that the strict parse passed: a value that doesn't convert (or is
+max_failed_rate = 0.0        # nan, inf or out of range) exits 2 before any check runs. Can't be disabled.
 severity = "error"
-enabled = true
+enabled = true               # must stay true (false is a config error)
 
 [checks.row_count_band]      # the row count is within min_rows..max_rows (metric: the count itself)
 severity = "warn"

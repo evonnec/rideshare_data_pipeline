@@ -13,6 +13,7 @@ from pathlib import Path
 
 from rideshare_data_pipeline.checks.model import CheckResult, Frame, Severity
 from rideshare_data_pipeline.config import QCConfig
+from rideshare_data_pipeline.io import atomic_path, write_text_atomic
 from rideshare_data_pipeline.money import STEPS
 from rideshare_data_pipeline.parse import FAMILIES, KINDS
 
@@ -68,6 +69,12 @@ class RunInfo:
 
     cache: str = "off"
     """"hit", "miss" or "off" (no cache directory configured)."""
+
+    blank_lines: int = 0
+    """Empty lines of the CSV that were read; dropped, not an error."""
+
+    parquet_name: str | None = None
+    """File name of the Parquet written into the output directory, if any."""
 
 
 def gates(result: CheckResult, fail_on: Severity) -> bool:
@@ -163,7 +170,8 @@ def spend(results: Sequence[CheckResult]) -> Json | None:
     ``{"rows", "amount"}`` object per step of ``money.STEPS`` (the naive total of
     ``order_total_amount``, what the currency-suspect rows, the non-rider-spend rows
     and the superseded rows take off it, and the clean USD rider spend), plus
-    ``suspect_rider_spend`` (the suspect rows that would be rider spend) and a
+    ``suspect_rider_spend`` (the suspect rows that would be rider spend),
+    ``micromobility`` (the bikes and scooters inside ``non_rider_spend``) and a
     ``note`` on the currency of the suspect amounts.
     """
     for r in results:
@@ -179,6 +187,9 @@ def spend(results: Sequence[CheckResult]) -> Json | None:
         ):
             return None
         table: Json = {step: dict(steps[step]) for step in STEPS}
+        micro = steps.get("micromobility")
+        if isinstance(micro, Mapping):
+            table["micromobility"] = dict(micro)
         table["suspect_rider_spend"] = dict(extra)
         table["note"] = str(suspect["note"])
         return table
@@ -221,6 +232,7 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
             "finished": run.finished,
             "elapsed_seconds": round(run.elapsed_seconds, 3),
             "cache": run.cache,
+            "blank_lines": run.blank_lines,
             "config": {
                 "fail_on": run.config.fail_on.value,
                 "sample_limit": run.config.sample_limit,
@@ -236,6 +248,10 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
         "summary": summarize(results),
         "checks": [_check_json(r) for r in results],
         "exit_code": code,
+        "outputs": {
+            "parquet": run.parquet_name,
+            "samples": [n for r in results if (n := sample_name(r)) is not None],
+        },
     }
     table = composition(results)
     if table is not None:
@@ -381,10 +397,36 @@ _SPEND_LABELS = {
     "naive_total": "naive total of order_total_amount (all rows, mixed currencies)",
     "currency_suspect": "minus currency-suspect rows (local currency)",
     "non_rider_spend": "minus non-rider-spend kinds",
+    "micromobility": "of which micromobility (excluded; not rider spend)",
     "superseded": "minus superseded duplicates",
     "clean_usd_rider_spend": "**= clean USD rider spend**",
 }
 _TOP_COUNTRIES = 10
+
+
+def _superseded_note(results: Sequence[CheckResult]) -> list[str]:
+    """Why the dedupe's superseded count and the waterfall's superseded line differ."""
+    table = spend(results)
+    flagged = next(
+        (
+            r.details.get("excess_rows")
+            for r in results
+            if r.name == "duplicate_receipts"
+        ),
+        None,
+    )
+    if table is None or not isinstance(flagged, int):
+        return []
+    n, _ = _money(table["superseded"])
+    return [
+        f'Why "superseded" is {n} rows here but {flagged:,} under Duplicate '
+        "receipts: the dedupe flags a row of any kind, in any currency, with or "
+        "without an amount. This line counts only the superseded rows that have an "
+        "amount and would otherwise be USD rider spend (rider-spend kinds, not "
+        "currency-suspect). The rest sit on the other lines above (a currency-suspect "
+        "or non-rider superseded row) or have no amount.",
+        "",
+    ]
 
 
 def _spend_section(results: Sequence[CheckResult]) -> list[str]:
@@ -394,8 +436,14 @@ def _spend_section(results: Sequence[CheckResult]) -> list[str]:
         return ["_Not available: the currency_suspect_rows check is disabled._", ""]
     rows = []
     for step, label in _SPEND_LABELS.items():
+        if step not in table:  # an older document without the micromobility line
+            continue
         n, amount = _money(table[step])
+        # The micromobility line is part of the non-rider step above it, not a
+        # further deduction.
         sign = "" if step in ("naive_total", "clean_usd_rider_spend") else "-"
+        if step == "micromobility":
+            sign = ""
         rows.append([label, n, f"{sign}{amount}"])
     out = [
         "Receipts with an amount; the file has no currency column. Rows are flagged, "
@@ -403,6 +451,7 @@ def _spend_section(results: Sequence[CheckResult]) -> list[str]:
         "",
         *_table(["step", "rows", "amount"], rows, right=(1, 2)),
         "",
+        *_superseded_note(results),
     ]
     n, amount = _money(table["suspect_rider_spend"])
     out += [
@@ -458,8 +507,12 @@ def _parsing_section(results: Sequence[CheckResult]) -> list[str]:
             return ["_Not available._", ""]
         names = [str(m) for m in merchants]
         out = [
-            "Ride and tip-update receipts that are not superseded; a row is parsed "
-            "when both its distance and its duration are read.",
+            "Ride and tip-update receipts that are not superseded, without the "
+            "`Increase Tip` / `Tip Increase` stub lines (they name no trip); a row is "
+            "parsed when both its distance and its duration are read. The check's "
+            f"rate is the {d.get('metric_label', 'worst merchant unparsed rate')}: "
+            "the highest unparsed share of any one merchant, not the failed rows "
+            "over the whole population.",
             "",
             *_table(
                 ["merchant", "rows", "parsed", "coverage"],
@@ -501,6 +554,19 @@ def _parsing_section(results: Sequence[CheckResult]) -> list[str]:
             ]
         return out
     return ["_Not available: the description_parse_coverage check is disabled._", ""]
+
+
+def _sample_caption(result: CheckResult, shown: int) -> str:
+    """The caption of a sample: "20 of 112 failing rows", or what the count means."""
+    group_rows = result.details.get("rows")
+    if result.name == "near_duplicate_rides" and isinstance(group_rows, int):
+        groups = result.details.get("groups", 0)
+        return (
+            f"{shown} sample rows of the {group_rows:,} rows in {groups:,} near-"
+            f"duplicate groups; {result.n_failed:,} failing rows is the excess (every "
+            "row of a group but one)"
+        )
+    return f"{shown} of {result.n_failed:,} failing rows"
 
 
 def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> str:
@@ -577,8 +643,7 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
         out += [
             f"### {r.name}",
             "",
-            f"{shown} of {r.n_failed:,} failing rows · "
-            f"[{sample_name(r)}]({sample_name(r)})",
+            f"{_sample_caption(r, shown)} · [{sample_name(r)}]({sample_name(r)})",
             "",
             *_sample_table(r.sample, run.config.sample_limit),
             "",
@@ -603,7 +668,14 @@ class Written:
 def write_report(
     out_dir: Path, results: Sequence[CheckResult], run: RunInfo, code: int
 ) -> Written:
-    """Write report.json, report.md and samples/<check>.parquet into out_dir."""
+    """Write report.json, report.md and samples/<check>.parquet into out_dir.
+
+    Every file is written to a temporary name beside it, then renamed into place,
+    so a file is either the old one or the new one, never partial. Nothing is
+    deleted but the old samples/*.parquet; other files in out_dir (a Parquet from
+    another input, say) are left alone, and report.json's ``outputs`` lists the
+    files of this run.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     # A re-run into the same directory must not leave samples from checks that
     # pass this time: report.json lists only this run's samples.
@@ -615,13 +687,14 @@ def write_report(
         if name is not None and r.sample is not None:
             path = out_dir / name
             path.parent.mkdir(exist_ok=True)
-            r.sample.write_parquet(path, compression="zstd")
+            with atomic_path(path) as tmp:
+                r.sample.write_parquet(tmp, compression="zstd")
             samples.append(path)
     json_path = out_dir / "report.json"
-    json_path.write_text(
+    write_text_atomic(
+        json_path,
         json.dumps(build_report(results, run, code), indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
     )
     md_path = out_dir / "report.md"
-    md_path.write_text(render_markdown(results, run, code) + "\n", encoding="utf-8")
+    write_text_atomic(md_path, render_markdown(results, run, code) + "\n")
     return Written(json_path, md_path, tuple(samples))

@@ -230,7 +230,15 @@ def cast_failures_check(counts: Mapping[str, int]) -> CheckResult:
 
     That count needs the raw String frame, which a typed LazyFrame no longer has,
     so it isn't a DatasetCheck: the caller computes the counts and wraps them
-    here. n_failed is the number of columns with failures, n_evaluated the number
+    here. Counted as failures: a value that doesn't parse, a Float64 that isn't
+    finite (``nan``, ``inf``, ``1e400``) and a timestamp or date outside the years
+    1 to 9999.
+
+    A run that reports this check had a strict parse that passed: any failure is a
+    CastError (exit 2, nothing written) before the checks run, so on a written
+    report it is always a pass, and the config can't disable it (see config.py).
+
+    ``n_failed`` is the number of columns with failures, ``n_evaluated`` the number
     of cast columns; the per-column counts are in `details`.
     """
     bad = {c: n for c, n in counts.items() if n}
@@ -276,7 +284,8 @@ def utf8_valid_check(facts: FileFacts) -> CheckResult:
     """S3: the file is valid UTF-8.
 
     Invalid bytes already raised EncodingError, so this passes on any run with a
-    frame. ``details``: ``has_bom`` and ``line_ending``.
+    frame. ``details``: ``has_bom``, ``line_ending`` and ``blank_lines`` (empty
+    lines, dropped on reading and not an error).
     """
     return CheckResult(
         name="utf8_valid",
@@ -289,7 +298,11 @@ def utf8_valid_check(facts: FileFacts) -> CheckResult:
         n_failed=0,
         n_evaluated=1,
         predicate="the file is valid UTF-8",
-        details={"has_bom": facts.has_bom, "line_ending": facts.line_ending},
+        details={
+            "has_bom": facts.has_bom,
+            "line_ending": facts.line_ending,
+            "blank_lines": facts.blank_lines,
+        },
     )
 
 
