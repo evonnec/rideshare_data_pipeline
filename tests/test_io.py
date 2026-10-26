@@ -32,6 +32,7 @@ from rideshare_data_pipeline.io import (
     FileFacts,
     HeaderError,
     InputError,
+    RaggedRowError,
     cast_failures,
     extract_member,
     input_csv,
@@ -104,27 +105,29 @@ def test_empty_file_raises_input_error(tmp_path: Path) -> None:
         read_typed(path)
 
 
-def test_row_with_too_many_fields_raises_input_error(
+def test_row_with_too_many_fields_raises_ragged_row_error(
     tmp_path: Path, synthetic_csv: Path
 ) -> None:
     text = synthetic_csv.read_bytes()
     path = tmp_path / "ragged.csv"
     path.write_bytes(text + text.splitlines()[-1] + b",one too many\r\n")
-    with pytest.raises(InputError, match=re.escape("can't parse ragged.csv")):
+    with pytest.raises(RaggedRowError) as info:
         read_typed(path)
+    assert (info.value.line, info.value.expected, info.value.found) == (5, 33, 34)
+    assert str(info.value) == "ragged.csv line 5: expected 33 fields, found 34"
 
 
-def test_row_with_too_few_fields_is_padded_with_nulls(
+def test_row_with_too_few_fields_raises_ragged_row_error(
     tmp_path: Path, synthetic_csv: Path
 ) -> None:
-    # Known gap, left to the edge-case suite (#23): polars pads the short row, so
-    # nothing flags it. This test pins the behaviour so a change is noticed.
+    # polars alone pads the short row with nulls; the ragged-row check refuses it.
     lines = synthetic_csv.read_bytes().splitlines(keepends=True)
     path = tmp_path / "short.csv"
     path.write_bytes(b"".join(lines[:2]) + b"Uber,only-two\r\n")
-    df, _ = read_typed(path)
-    assert df.height == 2
-    assert df["dttimestamp"][1] is None
+    with pytest.raises(RaggedRowError) as info:
+        read_typed(path)
+    assert (info.value.line, info.value.found) == (3, 2)
+    assert read_raw(path).collect().height == 2  # the padding is why it's needed
 
 
 # --- cast failures ----------------------------------------------------------------

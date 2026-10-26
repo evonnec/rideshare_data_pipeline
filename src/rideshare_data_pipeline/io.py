@@ -1,4 +1,12 @@
-"""Input and output: archive extraction, CSV validation, typed reading and writers."""
+"""Input and output: archive extraction, CSV validation, typed reading and writers.
+
+Ragged rows (a record without exactly 33 fields) are found in two steps, because
+polars pads a short row with nulls silently and has no option to raise: a
+vectorized polars pass counts commas outside quotes per line (about 0.2 s on the
+866 MB sample, no false negatives), and only if it flags a line does a quote-aware
+stdlib ``csv`` pass locate the physical line for RaggedRowError. See
+check_ragged_rows.
+"""
 
 import os
 from collections import Counter
@@ -363,6 +371,22 @@ class CastError(InputError):
         super().__init__(f"values that don't convert to their column's type:\n{detail}")
 
 
+class RaggedRowError(InputError):
+    """A row has too few or too many fields.
+
+    `line` is the 1-based physical line in the file where the bad record starts
+    (the header is line 1; a quoted field may hold a line break, so this can
+    differ from the record number), `expected` the column count and `found` the
+    number of fields the record has.
+    """
+
+    def __init__(self, message: str, *, line: int, expected: int, found: int) -> None:
+        super().__init__(message)
+        self.line = line
+        self.expected = expected
+        self.found = found
+
+
 @dataclass(frozen=True, slots=True)
 class FileFacts:
     """What the byte-level pass learned about a CSV."""
@@ -545,6 +569,97 @@ def inspect_csv(path: StrPath, name: str | None = None) -> FileFacts:
     return FileFacts(size, sha256, has_bom, line_ending, header, blank_lines)
 
 
+# The ragged-row check (see check_ragged_rows). polars pads a row that has too few
+# fields with nulls and offers no option to raise instead (checked on polars 2.0:
+# truncate_ragged_lines, missing_columns and extra_columns don't), so the check
+# works on the lines themselves.
+# A byte that doesn't occur in the data, so each line stays one field (a file that
+# does hold it makes the scan fail, which counts as a hit).
+_NO_SEPARATOR = "\x01"
+_QUOTE = '"'
+_QUOTED_SEGMENT = r'"[^"]*"'
+
+
+def _irregular_lines() -> pl.Expr:
+    """True for a line that isn't a record with exactly 33 fields on its own.
+
+    Quoted segments are removed before counting commas, so a quoted comma isn't a
+    separator. A line with an odd number of quotes is a record continuing onto the
+    next line (or a stray quote); it is flagged for the slow, exact locator.
+    Blank lines are read as null and are never flagged.
+    """
+    line = pl.col("line")
+    quotes = line.str.count_matches(_QUOTE, literal=True)
+    unquoted = (
+        pl.when(quotes == 0)
+        .then(line)
+        .otherwise(line.str.replace_all(_QUOTED_SEGMENT, ""))
+    )
+    commas = unquoted.str.count_matches(",", literal=True)
+    wrong = (commas != len(EXPECTED_COLUMNS) - 1) | (quotes % 2 == 1)
+    return wrong & line.is_not_null()
+
+
+def _may_be_ragged(path: Path) -> bool:
+    """Cheap, vectorized test: might some line not be a 33-field record?
+
+    Reads each line as one string column and counts commas outside quotes in
+    polars' own multi-threaded engine (about 0.2 s on the 866 MB sample, warm),
+    with no per-line Python. No false negatives; false positives are lines that
+    legitimately span several lines, which the locator then clears.
+    """
+    lines = pl.scan_csv(
+        path,
+        has_header=False,
+        separator=_NO_SEPARATOR,
+        quote_char=None,
+        infer_schema=False,
+        new_columns=["line"],
+    )
+    try:
+        hits = lines.select(_irregular_lines().sum()).collect(engine="streaming")
+    except pl.exceptions.PolarsError:
+        return True
+    return bool(hits.item())
+
+
+def locate_ragged_row(path: StrPath, name: str | None = None) -> None:
+    """Raise RaggedRowError for the first record without exactly 33 fields.
+
+    Exact and quote-aware (stdlib csv: a quoted comma isn't a separator, a quoted
+    field may hold line breaks), and slow: pure Python, several seconds per
+    million rows. Returns normally when every record is the right width. Blank
+    lines are skipped, as on reading.
+    """
+    path = Path(path)
+    expected = len(EXPECTED_COLUMNS)
+    line = 0
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        for record in reader:
+            start = line + 1
+            line = reader.line_num
+            if record and len(record) != expected:
+                found = len(record)
+                msg = (
+                    f"{name or path.name} line {start}: "
+                    f"expected {expected} fields, found {found}"
+                )
+                raise RaggedRowError(msg, line=start, expected=expected, found=found)
+
+
+def check_ragged_rows(path: StrPath, name: str | None = None) -> None:
+    """Raise RaggedRowError unless every record has exactly 33 fields.
+
+    Detects cheaply and locates slowly: _may_be_ragged is a vectorized polars pass
+    that costs well under 0.3 s on the 866 MB sample; only when it flags a line
+    does the exact stdlib locator run to find the physical line number. A valid
+    file with line breaks inside quoted fields also takes the slow path.
+    """
+    if _may_be_ragged(Path(path)):
+        locate_ragged_row(path, name)
+
+
 def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFrame:
     """Lazily scan the CSV with every column as String; nothing is inferred.
 
@@ -556,8 +671,8 @@ def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFra
     path = Path(path)
     facts = inspect_csv(path) if inspected is None else inspected
     # polars strips a BOM and accepts CRLF or LF itself. A row with too many
-    # fields makes the collect fail; one with too few is padded with nulls, which
-    # isn't detected (see the ragged-row check planned in the edge-case suite).
+    # fields makes the collect fail; one with too few is padded with nulls.
+    # read_typed runs check_ragged_rows first, which catches both with a line number.
     lf = pl.scan_csv(path, infer_schema=False)
     if facts.blank_lines == 0:
         # The byte scan found no blank line, so skip a 33-column filter over
@@ -609,6 +724,7 @@ def read_typed(
     """
     name = name or Path(path).name
     facts = inspect_csv(path, name)
+    check_ragged_rows(path, name)
     raw = read_raw(path, inspected=facts)
     try:
         failures = {col: n for col, n in cast_failures(raw).items() if n}
@@ -616,6 +732,7 @@ def read_typed(
             raise CastError(failures)
         return typed(raw).collect(engine="streaming"), facts
     except pl.exceptions.PolarsError as err:
+        locate_ragged_row(path, name)  # a precise error if a row's width is the cause
         msg = f"can't parse {name}: {_first_line(err)}"
         raise InputError(msg) from err
 

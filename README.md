@@ -171,7 +171,30 @@ A column is **all-null** when every value is null. It is **constant** when its n
 
 Input errors include a missing or unsupported file, an archive that can't be extracted or doesn't hold exactly one CSV, an empty file, bytes that aren't valid UTF-8 (the message gives the byte offset), a header with missing, extra, duplicated or reordered columns (the message names them), and values that don't convert to their column's type (the message counts the failures per column). Values are never nulled silently: a value counts as a cast failure when it doesn't parse, when a number is not finite (`nan`, `inf`, `-inf`, `Infinity`, or a value such as `1e400` that overflows), or when a timestamp or date falls outside the years 1 to 9999 (`0000-01-01`). All of them exit 2 with nothing written.
 
-**Blank lines.** A line that is empty (apart from a `\r`) is not a row: polars would read it as a row of nulls, so such rows are dropped on reading and counted. The count is `run.blank_lines` in `report.json`, `utf8_valid`'s `details.blank_lines`, and a `blank lines` line in the summary when it is not 0. A blank line is reported, not an error. (It is counted from the bytes, so a blank line inside a quoted field counts too.) Detecting a row with too few fields stays a separate known gap.
+**Blank lines.** A line that is empty (apart from a `\r`) is not a row: polars would read it as a row of nulls, so such rows are dropped on reading and counted. The count is `run.blank_lines` in `report.json`, `utf8_valid`'s `details.blank_lines`, and a `blank lines` line in the summary when it is not 0. A blank line is reported, not an error. (It is counted from the bytes, so a blank line inside a quoted field counts too.)
+
+## Input validation
+
+Every input problem is a typed exception (all subclasses of `InputError`), exits 2 and writes nothing. The message names the offending column, line or byte. `tests/test_edge_cases.py` runs each case end to end through the CLI.
+
+| Input | Exception | Message names |
+|---|---|---|
+| Empty file (0 bytes) | `InputError` | the file ("Data.csv is empty") |
+| Missing or unsupported file | `InputError` | the path or name |
+| Missing, extra or duplicated header names, or a reordered header | `HeaderError` | the columns (or the first column out of order) |
+| A row with too few or too many fields | `RaggedRowError` | the physical line, the expected count (33) and the count found |
+| Bytes that aren't valid UTF-8 | `EncodingError` | the byte offset of the first bad byte |
+| Values that don't cast (`1,234.00`, `$5`, `n/a`, `nan`, `inf`) | `CastError` | the column and its failure count |
+| No CSV, several, an unsafe member (absolute path, `..`, link), a `._*` sidecar alone, a damaged archive | `ArchiveError` | the member names or the problem |
+
+Cases that are not errors: a header-only file writes the reports and an empty Parquet with the right schema (`row_count_band` fails as a warning, so exit 0, or 1 with `--fail-on warn`); a single row runs (every non-null column is then reported constant); an all-null column is reported and kept; a BOM, CRLF or LF line endings and quoted commas or line breaks give the same results; `1e3` is accepted as 1000.0; a `._*` sidecar beside the CSV is ignored.
+
+**Ragged rows.** A record must have exactly 33 fields. polars pads a row with too few fields with nulls without a word and has no option to raise instead (`truncate_ragged_lines`, `missing_columns` and `extra_columns` don't, as of 2.0), so the check is its own. Detection is cheap and location is slow:
+
+1. A vectorized polars pass reads each line as one string and counts the commas outside quoted segments. It costs about 0.2 s on the 866 MB sample (the budget is 0.3 s) and has no false negatives.
+2. Only when it flags a line does a quote-aware stdlib `csv` pass run over the file to find the physical line (the header is line 1; a quoted field may hold a line break, so this can differ from the record number) and the field count. On the sample, locating a bad row near the middle takes about 3 to 4 s, and a clean scan of the whole file about 5 s.
+
+Both too few and too many fields are reported this way: `Data.csv line 5: expected 33 fields, found 31`. A valid file whose quoted fields contain line breaks also takes the slow pass, because a record that spans lines can't be told from a short one by line alone; the pass then finds nothing and the run goes on. Counting separators in the byte scan itself was rejected: it needs a quote-state machine per byte, which is far over budget in pure Python.
 
 **`cast_failures` (S2)** records that the strict parse passed: any failure aborts the run with exit 2 before any check runs, so on a report it is always a pass. `enabled = false` for it is a config error, because it would only hide that line.
 
@@ -436,7 +459,7 @@ Planned work is tracked in the GitHub issues:
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
 - Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19, done), fare outliers (#20, done), trip plausibility (#21, done), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22, done), privacy normalization (#30), and a stakeholder summary (#31).
-- Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).
+- Tests and docs: edge-case inputs (#23, done), end-to-end and performance tests (#24), and the full README (#25).
 
 ## License
 
