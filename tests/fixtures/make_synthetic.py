@@ -120,6 +120,10 @@ MANIFEST: dict[str, int] = {
     "CUR1": 3,
     "CUR1.non_us": 2,
     "CUR1.km_generic": 1,
+    # The population of money.usd_rides: rider-spend rows (293 - 8 non-spend = 285)
+    # that are not superseded (3) and not currency-suspect (3). The three groups
+    # are disjoint, and every row has a total.
+    "USD.rides": 279,
     "T2": 0,  # negative control: apac_next_day is within tolerance, Lyft 5 h row too
     "T3": 1,  # ancient_order is > 7 days late (every other lag is <= 2 days)
     "T3.30d": 1,  # ... and > 30 days late
@@ -147,6 +151,11 @@ MANIFEST: dict[str, int] = {
     "T1": 0,  # insert <= update <= source_dttimestamp <= dttimestamp
     "T5": 0,  # email_time <= update_time in every row (tip update included)
 }
+
+# The sum of order_total_amount over the USD.rides rows: the naive total less what the
+# three groups take off (derived from the rows, then pinned: 9,762.45 - 5,734.35 -
+# 228.82 - 29.36).
+USD_AMOUNT = 3769.92
 
 _FIRST_NAMES = ("Alex", "Sam", "Jordan", "Taylor", "Casey", "Morgan")
 _US_UBER_SENDERS = (

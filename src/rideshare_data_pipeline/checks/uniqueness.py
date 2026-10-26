@@ -33,7 +33,10 @@ from rideshare_data_pipeline.dedupe import (
 )
 from rideshare_data_pipeline.parse import KINDS
 
-CURRENCY_NOTE = "mixed currencies (the file has no currency column); USD only from #15"
+CURRENCY_NOTE = (
+    "USD rider spend only: currency-suspect rows are in excess_spend_suspect "
+    "(local currency, not summable as USD)"
+)
 
 _SAMPLE_COLS = (*KEY_COLS, "receipt_kind", "is_superseded")
 _NEAR_KEY = (
@@ -109,6 +112,7 @@ def _repeated(lf: pl.LazyFrame) -> tuple[Frame, int]:
                 "checksum",
                 pl.col("receipt_kind").cast(pl.String),
                 "is_rider_spend",
+                "currency_suspect",
                 "is_superseded",
             ),
             lf.select(has_key().sum()),
@@ -128,17 +132,21 @@ def duplicate_receipts_check(lf: pl.LazyFrame) -> CheckResult:
     ``n_failed`` is every row of a repeated key (the nulls are dropped first: a null
     order number is no key); ``n_evaluated`` the rows with a key. ``details``:
     ``groups``; ``excess_rows`` (the superseded rows, one fewer than each group);
-    ``excess_spend`` (``order_total_amount`` summed over superseded rider-spend rows;
-    see ``currency``); ``kind_pairs``, a list of ``{pair, groups, excess_spend}``
-    by the kinds in a group (``ride+tip_update``), biggest first.
+    ``excess_spend`` (``order_total_amount`` summed over superseded rows that would
+    otherwise be USD rider spend: rider-spend kinds, not currency-suspect);
+    ``excess_spend_suspect`` (the same over currency-suspect rows, in local
+    currency, not summable as USD; see ``currency``); ``kind_pairs``, a list of
+    ``{pair, groups, excess_spend}`` (USD) by the kinds in a group
+    (``ride+tip_update``), biggest first.
     """
     rows, keyed = _repeated(_flagged(lf))
     superseded = pl.col("is_superseded") & pl.col("is_rider_spend")
+    usd = superseded & ~pl.col("currency_suspect")
     groups = (
         rows.group_by(KEY)
         .agg(
             pl.col("receipt_kind"),
-            pl.col("order_total_amount").filter(superseded).sum().alias("spend"),
+            pl.col("order_total_amount").filter(usd).sum().alias("spend"),
         )
         .with_columns(pl.col("receipt_kind").map_elements(_pair_label, pl.String))
     )
@@ -160,7 +168,15 @@ def duplicate_receipts_check(lf: pl.LazyFrame) -> CheckResult:
             "groups": groups.height,
             "excess_rows": int(rows["is_superseded"].sum()),
             "excess_spend": round(
-                float(rows.filter(superseded)["order_total_amount"].sum()), 2
+                float(rows.filter(usd)["order_total_amount"].sum()), 2
+            ),
+            "excess_spend_suspect": round(
+                float(
+                    rows.filter(superseded & pl.col("currency_suspect"))[
+                        "order_total_amount"
+                    ].sum()
+                ),
+                2,
             ),
             "currency": CURRENCY_NOTE,
             "kind_pairs": [

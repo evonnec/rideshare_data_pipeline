@@ -15,6 +15,7 @@ lazy import polars as pl
 
 from rideshare_data_pipeline.checks import (
     arithmetic,
+    currency,
     kinds,
     parsing,
     structural,
@@ -39,7 +40,12 @@ __all__ = [
 
 def default_rules() -> tuple[RowRule, ...]:
     """Return every registered row rule."""
-    return (*arithmetic.rules(), *uniqueness.rules(), *kinds.rules())
+    return (
+        *arithmetic.rules(),
+        *uniqueness.rules(),
+        *kinds.rules(),
+        *currency.rules(),
+    )
 
 
 def default_dataset_checks() -> tuple[DatasetCheck, ...]:
@@ -49,6 +55,7 @@ def default_dataset_checks() -> tuple[DatasetCheck, ...]:
         *kinds.dataset_checks(),
         *uniqueness.dataset_checks(),
         *parsing.dataset_checks(),
+        *currency.dataset_checks(),
     )
 
 

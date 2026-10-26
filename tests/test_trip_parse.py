@@ -94,6 +94,7 @@ def frame(descriptions: list[str | None]) -> pl.DataFrame:
             "order_number": nulls,
             "order_pickup": pl.Series([1] * n, dtype=pl.Int8),
             "product_category": ["Travel"] * n,
+            "from_domain": nulls,
         }
     )
 

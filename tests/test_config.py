@@ -121,7 +121,12 @@ def test_configure_rules_replaces_and_drops() -> None:
         }
     )
     rules = {r.name: r for r in configure_rules(default_rules(), config)}
-    assert list(rules) == ["non_negative_total", "category_mismatch"]
+    assert list(rules) == [
+        "non_negative_total",
+        "category_mismatch",
+        "merchant_sender_consistent",
+        "unknown_sender",
+    ]
     assert rules["non_negative_total"].max_failed_rate == 0.5
     assert rules["non_negative_total"].severity is Severity.WARN
     # An untouched rule is returned as it was.

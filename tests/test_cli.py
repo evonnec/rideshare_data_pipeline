@@ -160,6 +160,8 @@ def test_csv_end_to_end(
         "non_negative_total",
         "checksum_unique",
         "category_mismatch",
+        "merchant_sender_consistent",
+        "unknown_sender",
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
@@ -170,6 +172,7 @@ def test_csv_end_to_end(
         "cross_panelist_duplicates",
         "near_duplicate_rides",
         "description_parse_coverage",
+        "currency_suspect_rows",
     ]
     assert all(line.split()[1] == "PASS" for line in check_lines)
     found = summary(stdout)

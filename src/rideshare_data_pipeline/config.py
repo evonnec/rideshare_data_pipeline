@@ -37,6 +37,8 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "non_negative_total",
     "checksum_unique",
     "category_mismatch",
+    "merchant_sender_consistent",
+    "unknown_sender",
     "all_null_columns",
     "constant_columns",
     "duplicate_rows",
@@ -47,6 +49,7 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "cross_panelist_duplicates",
     "near_duplicate_rides",
     "description_parse_coverage",
+    "currency_suspect_rows",
 )
 
 # `fail_on` can only be a gating severity: info checks never gate.

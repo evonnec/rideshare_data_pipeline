@@ -64,7 +64,7 @@ def synthetic_row(i: int) -> Row:
         "SKU": "",
         "item_id": "",
         "order_pickup": str(i % 5),
-        "from_domain": f"receipts{i}@example.com",
+        "from_domain": ("noreply@uber.com", "no-reply@lyftmail.com")[i % 2],
         "email_subject": f"Your trip receipt {i}",
         "delivery_date": f"2019-02-{day} 00:00:00.000",
         "start_source_folder_date": f"2019-02-{day}",

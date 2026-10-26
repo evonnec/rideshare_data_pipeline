@@ -7,7 +7,7 @@ from pathlib import Path
 import jsonschema
 import polars as pl
 import pytest
-from fixtures.make_synthetic import MANIFEST
+from fixtures.make_synthetic import MANIFEST, USD_AMOUNT
 from synthetic import write_csv_text
 
 from rideshare_data_pipeline import __version__
@@ -25,8 +25,25 @@ from rideshare_data_pipeline.report import (
     summarize,
 )
 
-IMPLEMENTED = ("S2", "A1", "U1", "S4", "S5", "U0", "V2", "U2", "U2b", "U3", "U4")
+IMPLEMENTED = (
+    "S2",
+    "A1",
+    "U1",
+    "S4",
+    "S5",
+    "U0",
+    "V2",
+    "U2",
+    "U2b",
+    "U3",
+    "U4",
+    "CUR1",
+    "V1",
+    "V3",
+)
 DUPLICATE_CHECKS = (
+    "currency_suspect_rows",
+    "unknown_sender",
     "duplicate_receipts",
     "cross_panelist_duplicates",
     "near_duplicate_rides",
@@ -111,6 +128,7 @@ def test_run_writes_reports_and_samples(
         "duplicate_receipts.parquet",
         "near_duplicate_rides.parquet",
         "non_negative_total.parquet",
+        "unknown_sender.parquet",
     ]
     sample = pl.read_parquet(out / "samples" / "non_negative_total.parquet")
     assert sample.height == MANIFEST["A1"]
@@ -156,10 +174,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 4,  # V2, U2, U3, U4
+        "warnings_failed": 6,  # V2, U2, U3, U4, CUR1, V3
         "info": 4,
-        "passed": 9,
-        "total": 14,
+        "passed": 10,
+        "total": 17,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -198,6 +216,7 @@ def test_report_markdown_layout(full_synthetic_csv: Path, tmp_path: Path) -> Non
         "## Summary",
         "## Composition by receipt kind",
         "## Duplicate receipts",
+        "## Spend",
         "## Column profile",
         "## Samples",
         "### non_negative_total",
@@ -287,6 +306,72 @@ def test_schema_rejects_unknown_composition_keys(
         jsonschema.validate(report, json.loads(schema_text()))
 
 
+# --- spend --------------------------------------------------------------------
+
+
+def test_spend_in_json_and_markdown(full_synthetic_csv: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    report = load(out)
+    jsonschema.validate(report, json.loads(schema_text()))
+    spend = report["spend"]
+    assert isinstance(spend, dict)
+    assert spend["naive_total"]["rows"] == report["run"]["rows"]  # type: ignore[index]
+    assert spend["currency_suspect"]["rows"] == MANIFEST["CUR1"]
+    assert spend["clean_usd_rider_spend"] == {
+        "rows": MANIFEST["USD.rides"],
+        "amount": USD_AMOUNT,
+    }
+    assert spend["suspect_rider_spend"]["rows"] == MANIFEST["CUR1"]
+    assert "local currency" in spend["note"]
+    # the waterfall adds up
+    taken = sum(
+        spend[k]["amount"]
+        for k in ("currency_suspect", "non_rider_spend", "superseded")
+    )
+    assert spend["naive_total"]["amount"] - taken == pytest.approx(
+        spend["clean_usd_rider_spend"]["amount"]
+    )
+
+    text = (out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Spend")[1].split("## Description parsing")[0]
+    assert "| minus currency-suspect rows (local currency) | 3 | -5,734.35 |" in section
+    assert "| **= clean USD rider spend** | 279 | 3,769.92 |" in section
+    assert "| non_us_sender | 2 |" in section
+    assert "| co | 1 |" in section
+    assert "not summable as USD" in section
+
+
+def test_spend_is_omitted_when_cur1_is_disabled(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(
+        full_synthetic_csv,
+        out,
+        config="[checks.currency_suspect_rows]\nenabled = false\n",
+    )
+    report = load(out)
+    assert "spend" not in report
+    jsonschema.validate(report, json.loads(schema_text()))
+    assert "_Not available: the currency_suspect_rows check is disabled._" in (
+        out / "report.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_schema_rejects_a_malformed_spend(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    report = load(out)
+    spend = report["spend"]
+    assert isinstance(spend, dict)
+    del spend["naive_total"]["amount"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(report, json.loads(schema_text()))
+
+
 # --- thresholds, severities, enabled -------------------------------------------
 
 
@@ -312,7 +397,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 5  # type: ignore[index]  # A1, V2, U2, U3, U4
+    assert report["summary"]["warnings_failed"] == 7  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
