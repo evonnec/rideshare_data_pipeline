@@ -138,6 +138,9 @@ def test_configure_rules_replaces_and_drops() -> None:
         "late_receipts",
         "order_before_window",
         "email_after_update",
+        "implausible_speed",
+        "zero_trip_metrics",
+        "extreme_trip",
     ]
     assert rules["non_negative_total"].max_failed_rate == 0.5
     assert rules["non_negative_total"].severity is Severity.WARN
@@ -242,10 +245,48 @@ def test_invalid_params_raise(tmp_path: Path, text: str, message: str) -> None:
         load_config(write(tmp_path, text))
 
 
-def test_shipped_example_sets_the_default_ks() -> None:
+def test_shipped_example_sets_the_default_params() -> None:
     example = Path(__file__).parent.parent / "qc.example.toml"
     config = load_config(example)
     assert config.check_params() == {
         "fare_outlier_conditional": {"k": 4.0},
         "fare_outlier_univariate": {"k": 3.5},
+        "implausible_speed": {"max_mph": 80.0, "min_seconds": 120.0},
+        "extreme_trip": {"max_miles": 100.0, "max_seconds": 10800.0},
     }
+
+
+# --- trip plausibility params (#21) -----------------------------------------------
+
+
+def test_plausibility_params_parse(tmp_path: Path) -> None:
+    config = load_config(
+        write(
+            tmp_path,
+            "[checks.implausible_speed.params]\nmax_mph = 70\nmin_seconds = 60\n"
+            "[checks.extreme_trip.params]\nmax_miles = 50.5\nmax_seconds = 7200\n",
+        )
+    )
+    assert config.check_params() == {
+        "implausible_speed": {"max_mph": 70.0, "min_seconds": 60.0},
+        "extreme_trip": {"max_miles": 50.5, "max_seconds": 7200.0},
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("[checks.implausible_speed.params]\nmph = 80", "unknown 'mph'"),
+        ("[checks.implausible_speed.params]\nmax_mph = 0", "greater than 0"),
+        ("[checks.implausible_speed.params]\nmin_seconds = -1", "greater than 0"),
+        ("[checks.extreme_trip.params]\nmax_miles = 'far'", "greater than 0"),
+        ("[checks.extreme_trip.params]\nmax_seconds = nan", "greater than 0"),
+        ("[checks.extreme_trip.params]\nmax_mph = 80", "unknown 'max_mph'"),
+        ("[checks.zero_trip_metrics.params]\nk = 1", "unknown 'k' \\(known: \\)"),
+    ],
+)
+def test_invalid_plausibility_params_raise(
+    tmp_path: Path, text: str, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write(tmp_path, text))

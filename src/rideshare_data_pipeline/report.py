@@ -693,6 +693,42 @@ def _time_section(results: Sequence[CheckResult], run: RunInfo) -> list[str]:
     return out
 
 
+def _plausibility_section(results: Sequence[CheckResult]) -> list[str]:
+    """The "Trip plausibility" section body, from O1-O3 (one row per check)."""
+    names = ("implausible_speed", "zero_trip_metrics", "extreme_trip")
+    by_name = {r.name: r for r in results}
+    found = [by_name[n] for n in names if n in by_name]
+    if not found:
+        return ["_Not available: the trip plausibility checks are disabled._", ""]
+    rows = []
+    for r in found:
+        split = _by_field(results, r.name) or {}
+        rows.append(
+            [
+                f"{r.check_id} {r.name}",
+                r.severity.value,
+                r.predicate,
+                f"{r.n_failed:,}",
+                f"{r.n_evaluated:,}",
+                _pct(r.metric),
+                ", ".join(f"{k} {v:,}" for k, v in split.items()) or "none",
+            ]
+        )
+    return [
+        "Physical checks on the parsed trip metrics, over ride and tip-update "
+        "receipts that are not superseded. A null distance or duration is never "
+        "flagged (the parse coverage check owns it), and the speed is computed only "
+        "where the duration is above 0.",
+        "",
+        *_table(
+            ["check", "severity", "rule", "flagged", "of", "rate", "breakdown"],
+            rows,
+            right=(3, 4, 5),
+        ),
+        "",
+    ]
+
+
 def _outliers_section(results: Sequence[CheckResult]) -> list[str]:
     """The "Outliers" section body, from ``fare_outlier_conditional`` (O4) and
     ``fare_outlier_univariate`` (O5)."""
@@ -907,6 +943,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out += _time_section(results, run)
     out += ["## Outliers", ""]
     out += _outliers_section(results)
+    out += ["## Trip plausibility", ""]
+    out += _plausibility_section(results)
     out += ["## Column profile", ""]
     all_null = _columns(results, "all_null_columns")
     constant = _columns(results, "constant_columns")

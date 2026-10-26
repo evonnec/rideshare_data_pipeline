@@ -58,6 +58,9 @@ IMPLEMENTED = (
     "T4",
     "T5",
     "T6",
+    "O1",
+    "O2",
+    "O3",
     "O4",
     "O5",
 )
@@ -72,6 +75,8 @@ DUPLICATE_CHECKS = (
     "late_receipts",
     "order_before_window",
     "fare_outlier_conditional",
+    "implausible_speed",
+    "zero_trip_metrics",
     *ARITH_WARNS,
 )
 LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n" + "".join(
@@ -157,6 +162,7 @@ def test_run_writes_reports_and_samples(
         "duplicate_receipts.parquet",
         "fare_outlier_conditional.parquet",
         "id_formats.parquet",
+        "implausible_speed.parquet",
         "late_receipts.parquet",
         "near_duplicate_rides.parquet",
         "non_negative_total.parquet",
@@ -164,6 +170,7 @@ def test_run_writes_reports_and_samples(
         "tax_within_total.parquet",
         "unknown_sender.parquet",
         "zero_fare_rides.parquet",
+        "zero_trip_metrics.parquet",
     ]
     sample = pl.read_parquet(out / "samples" / "non_negative_total.parquet")
     assert sample.height == MANIFEST["A1"]
@@ -209,10 +216,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 13,  # V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4, O4
+        "warnings_failed": 15,  # V2 U2 U3 U4 CUR1 V3 S6 A3 A4 A5 T3 T4 O1 O2 O4
         "info": 7,
-        "passed": 23,
-        "total": 37,
+        "passed": 24,
+        "total": 40,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -432,7 +439,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 14  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4, O4
+    assert report["summary"]["warnings_failed"] == 16  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4, O1, O2, O4
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
@@ -813,3 +820,53 @@ def test_outliers_section_when_both_checks_are_disabled(
     run_cli(full_synthetic_csv, out, config=config)
     text = (out / "report.md").read_text(encoding="utf-8")
     assert "_Not available: both outlier checks are disabled._" in text
+
+
+# --- trip plausibility (#21) ----------------------------------------------------
+
+
+def test_plausibility_section_shows_each_threshold_and_breakdown(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    text = (out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Trip plausibility")[1].split("## Column profile")[0]
+    assert "| O1 implausible_speed | warn | implied speed is at most 80 mph" in section
+    assert "120 s or more" in section
+    assert "| O2 zero_trip_metrics | warn |" in section
+    assert "zero_distance 0, zero_duration 1, both 0" in section
+    assert "at most 100 mi and duration at most 10,800 s" in section
+    assert "over_distance 0, over_duration 0" in section
+    report = load(out)
+    by_name = checks_by_name(report)
+    assert by_name["zero_trip_metrics"]["details"]["by_field"] == {  # type: ignore[index]
+        "zero_distance": 0,
+        "zero_duration": 1,
+        "both": 0,
+    }
+    jsonschema.validate(report, json.loads(schema_text()))
+
+
+def test_plausibility_section_reflects_params_and_disabling(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    config = LOOSE_V2 + "[checks.extreme_trip.params]\nmax_miles = 12.5\n"
+    run_cli(full_synthetic_csv, out, config=config)
+    section = (out / "report.md").read_text(encoding="utf-8").split("## Trip plaus")[1]
+    assert "distance is at most 12.5 mi" in section.split("## Column profile")[0]
+    off = "".join(
+        f"[checks.{n}]\nenabled = false\n"
+        for n in ("implausible_speed", "zero_trip_metrics", "extreme_trip")
+    )
+    run_cli(
+        full_synthetic_csv,
+        tmp_path / "b",
+        config=off
+        + LOOSE_V2.replace(
+            "[checks.implausible_speed]\nmax_failed_rate = 0.05\n", ""
+        ).replace("[checks.zero_trip_metrics]\nmax_failed_rate = 0.05\n", ""),
+    )
+    text = (tmp_path / "b" / "report.md").read_text(encoding="utf-8")
+    assert "_Not available: the trip plausibility checks are disabled._" in text

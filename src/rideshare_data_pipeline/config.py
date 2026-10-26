@@ -33,13 +33,13 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rideshare_data_pipeline.checks import outliers, plausibility
 from rideshare_data_pipeline.checks.model import (
     SAMPLE_LIMIT,
     CheckResult,
     RowRule,
     Severity,
 )
-from rideshare_data_pipeline.checks.outliers import PARAM_NAMES
 from rideshare_data_pipeline.io import InputError, StrPath
 
 # Every check a run can report, in report order: the registered row rules, then
@@ -66,6 +66,9 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "late_receipts",
     "order_before_window",
     "email_after_update",
+    "implausible_speed",
+    "zero_trip_metrics",
+    "extreme_trip",
     "all_null_columns",
     "constant_columns",
     "duplicate_rows",
@@ -83,6 +86,12 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "fare_outlier_conditional",
     "fare_outlier_univariate",
 )
+
+# The params each check accepts, from the modules that define the checks.
+PARAM_NAMES: Mapping[str, tuple[str, ...]] = {
+    **outliers.PARAM_NAMES,
+    **plausibility.PARAM_NAMES,
+}
 
 # `fail_on` can only be a gating severity: info checks never gate.
 _FAIL_ON = (Severity.ERROR, Severity.WARN)
