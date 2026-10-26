@@ -33,6 +33,9 @@ from rideshare_data_pipeline.sender import (
 
 NO_COUNTRY = "(none)"
 LOCAL_CURRENCY_NOTE = "local currency, not summable as USD"
+FOREIGN_SUBJECT_NOTE = (
+    "Spanish or Portuguese subject from a US sender: tagged, not currency-suspect"
+)
 
 _SAMPLE_COLS = (*KEY_COLS, "receipt_kind", "sender_country")
 
@@ -84,13 +87,22 @@ def currency_suspect_check(lf: pl.LazyFrame) -> CheckResult:
     ``(none)``), ``suspect_sum`` (rows and amount over every suspect row),
     ``suspect_rider_spend`` (the suspect rows that would be rider spend) and
     ``spend``, the waterfall from the naive total to the clean USD rider spend (see
-    ``money.spend_waterfall``).
+    ``money.spend_waterfall``; ``micromobility`` is a sub-line of its non-rider
+    step) and ``foreign_subject`` (rows with a Spanish or Portuguese subject that
+    are NOT currency-suspect, because the sender is a US one: an info tag, not a
+    reason).
     """
     if "is_superseded" not in lf.collect_schema().names():
         lf = supersede_flags(lf)
     suspect = lf.filter(pl.col("currency_suspect"))
     amount = pl.col("order_total_amount")
-    by_reason, by_country, totals, n_rows = pl.collect_all(
+    names = lf.collect_schema().names()
+    tagged = (
+        lf.filter(pl.col("foreign_subject") & ~pl.col("currency_suspect"))
+        if "foreign_subject" in names
+        else lf.clear()
+    )
+    by_reason, by_country, totals, n_rows, tag = pl.collect_all(
         [
             suspect.group_by(pl.col("currency_reason").cast(pl.String)).agg(
                 pl.len().alias("rows"), amount.sum().alias("amount")
@@ -100,6 +112,7 @@ def currency_suspect_check(lf: pl.LazyFrame) -> CheckResult:
             ),
             lf.select(waterfall_exprs()),
             lf.select(pl.len()),
+            tagged.select(pl.len().alias("rows"), amount.sum().alias("amount")),
         ],
         engine="streaming",
     )
@@ -127,7 +140,7 @@ def currency_suspect_check(lf: pl.LazyFrame) -> CheckResult:
         n_evaluated=total,
         predicate=(
             "no receipt is currency-suspect (a non-US sender, a km distance or a "
-            "Spanish or Portuguese subject)"
+            "Spanish or Portuguese subject from a sender that is not a US one)"
         ),
         sample=None,
         details={
@@ -137,6 +150,11 @@ def currency_suspect_check(lf: pl.LazyFrame) -> CheckResult:
             "suspect_sum": {**spend["currency_suspect"], "note": LOCAL_CURRENCY_NOTE},
             "suspect_rider_spend": spend["suspect_rider_spend"],
             "spend": {k: v for k, v in spend.items() if k != "suspect_rider_spend"},
+            "foreign_subject": {
+                "rows": tag["rows"].item(),
+                "amount": round(float(tag["amount"].item() or 0.0), 2),
+                "note": FOREIGN_SUBJECT_NOTE,
+            },
         },
     )
 

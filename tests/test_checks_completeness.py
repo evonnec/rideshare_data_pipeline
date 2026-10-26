@@ -96,7 +96,17 @@ def test_utf8_valid_records_bom_and_line_ending(
 ) -> None:
     res = utf8_valid_check(facts(has_bom=has_bom, line_ending=line_ending))
     assert (res.check_id, res.severity, res.passed) == ("S3", Severity.ERROR, True)
-    assert res.details == {"has_bom": has_bom, "line_ending": line_ending}
+    assert res.details == {
+        "has_bom": has_bom,
+        "line_ending": line_ending,
+        "blank_lines": 0,
+    }
+
+
+def test_utf8_valid_reports_blank_lines() -> None:
+    res = utf8_valid_check(facts(blank_lines=3))
+    assert res.passed  # a blank line is dropped and reported, not an error
+    assert res.details["blank_lines"] == 3
 
 
 # --- C1 ---------------------------------------------------------------------------

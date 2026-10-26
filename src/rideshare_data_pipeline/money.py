@@ -13,11 +13,19 @@ A row is in it when it:
   cancellation fee);
 * is not superseded by a later version of the receipt (``is_superseded``);
 * is not currency-suspect (``currency_suspect``: a non-US sender, a km description
-  or a Spanish or Portuguese subject; see ``parse.py``);
+  or a Spanish or Portuguese subject from a sender that is not a US one; see
+  ``parse.py``);
 * has a non-null ``order_total_amount``.
 
 Rows outside it are flagged, never dropped; no exchange rate is applied (FX
 conversion is future work).
+
+Two policy notes. Micromobility (bikes and scooters) is not rider spend: it stays out
+of the population and has its own line under the non-rider step of the waterfall
+(``micromobility``, a sub-line that is part of ``non_rider_spend``, so the steps
+still add up). And a tip update counts as a full final fare: it supersedes the ride
+it amends (see ``dedupe.py``), so the population holds the ride's total once, as
+its final version, never the ride plus the tip.
 """
 
 from collections.abc import Mapping
@@ -72,15 +80,18 @@ def waterfall_exprs() -> list[pl.Expr]:
 
     Every row with an amount is in exactly one of the four groups, taken in this
     order: currency-suspect (any kind), non-rider-spend, superseded rider spend,
-    and the rest (the clean USD rider spend).
+    and the rest (the clean USD rider spend). ``micro`` is the micromobility part
+    of the non-rider group (a sub-line, not a fifth group).
     """
     suspect = pl.col("currency_suspect")
     spend = pl.col("is_rider_spend")
     superseded = pl.col("is_superseded")
+    micro = pl.col("receipt_kind").cast(pl.String) == "micromobility"
     return [
         *_step(None, "naive"),
         *_step(suspect, "suspect"),
         *_step(~suspect & ~spend, "non_spend"),
+        *_step(~suspect & ~spend & micro, "micro"),
         *_step(~suspect & spend & superseded, "superseded"),
         *_step(~suspect & spend & ~superseded, "clean"),
         *_step(suspect & spend & ~superseded, "suspect_spend"),
@@ -93,8 +104,10 @@ def spend_waterfall(row: Mapping[str, float | int]) -> Waterfall:
     ``naive_total`` is the sum of ``order_total_amount`` over every row with an
     amount; the next three are what is taken off it, and
     ``clean_usd_rider_spend = naive_total - currency_suspect - non_rider_spend -
-    superseded``. ``suspect_rider_spend`` (not a step) is the part of the suspect
-    rows that would otherwise be rider spend. Amounts are rounded to cents.
+    superseded``. ``micromobility`` (not a step) is the part of ``non_rider_spend``
+    that is bikes and scooters. ``suspect_rider_spend`` (not a step) is the part of
+    the suspect rows that would otherwise be rider spend. Amounts are rounded to
+    cents.
     """
 
     def cell(name: str) -> dict[str, float | int]:
@@ -109,5 +122,6 @@ def spend_waterfall(row: Mapping[str, float | int]) -> Waterfall:
         "non_rider_spend": cell("non_spend"),
         "superseded": cell("superseded"),
         "clean_usd_rider_spend": cell("clean"),
+        "micromobility": cell("micro"),
         "suspect_rider_spend": cell("suspect_spend"),
     }

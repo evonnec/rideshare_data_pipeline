@@ -95,21 +95,35 @@ def casts() -> dict[str, pl.DataType]:
     }
 
 
+# Python's datetime and date cover the years 1 to 9999; polars parses year 0 and
+# beyond 9999, which can't be converted to Python (min(), isoformat, row()).
+_MIN_YEAR, _MAX_YEAR = 1, 9999
+
+
 def cast_expr(column: str, dtype: pl.DataType) -> pl.Expr:
     """Return an expression casting the String column to dtype; failures become null.
 
     Timestamps and dates use the explicit formats above (the CSV reader would only
     infer them). A value that doesn't convert is null, never an error, so that
     cast_failures() can count it; compare with the raw column to tell a failure
-    from an empty field. Polars' float parser also accepts "1e3", "nan" and "inf".
+    from an empty field. Two kinds of value that do parse are failures too, so no
+    later step has to cope with them: a Float64 that is not finite (polars' float
+    parser accepts "nan", "inf" and "1e400", which overflows to inf), and a
+    timestamp or date outside the years 1 to 9999 (year 0 can't be a Python date).
     """
-    if isinstance(dtype, pl.Datetime):
-        return pl.col(column).str.to_datetime(
-            TIMESTAMP_FORMAT, time_unit=dtype.time_unit, strict=False
-        )
-    if isinstance(dtype, pl.Date):
-        return pl.col(column).str.to_date(DATE_FORMAT, strict=False)
-    return pl.col(column).cast(dtype, strict=False)
+    col = pl.col(column)
+    if isinstance(dtype, pl.Datetime | pl.Date):
+        if isinstance(dtype, pl.Datetime):
+            parsed = col.str.to_datetime(
+                TIMESTAMP_FORMAT, time_unit=dtype.time_unit, strict=False
+            )
+        else:
+            parsed = col.str.to_date(DATE_FORMAT, strict=False)
+        return pl.when(parsed.dt.year().is_between(_MIN_YEAR, _MAX_YEAR)).then(parsed)
+    cast = col.cast(dtype, strict=False)
+    if isinstance(dtype, pl.Float64):
+        return pl.when(cast.is_finite()).then(cast)
+    return cast
 
 
 def csv_schema() -> pl.Schema:

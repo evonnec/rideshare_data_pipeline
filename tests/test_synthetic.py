@@ -261,6 +261,17 @@ def test_currency_and_sender_checks_match_the_manifest(
         "non_us_sender": MANIFEST["CUR1.non_us"],
         "km_unit": MANIFEST["CUR1.km_generic"],
     }
+    # F6: the US sender's Spanish subject is tagged (foreign_subject), not suspect,
+    # and it is a clean USD ride. The non-US row's Spanish subject is tagged too.
+    tag = cur1.details["foreign_subject"]
+    assert isinstance(tag, dict)
+    assert tag["rows"] == MANIFEST["CUR1.foreign_us"]
+    (spanish,) = INJECTIONS["us_spanish_subject"]
+    assert df["foreign_subject"][spanish]
+    assert not df["currency_suspect"][spanish]
+    assert df.filter(pl.col("foreign_subject")).height == (
+        MANIFEST["CUR1.foreign_us"] + 1
+    )
     assert (v1.n_failed, v1.passed) == (MANIFEST["V1"], True)
     assert (v3.n_failed, v3.passed) == (MANIFEST["V3"], False)
     # V3 finds the freight sender, and its sample never carries the address.
@@ -286,6 +297,8 @@ def test_usd_rides_excludes_the_gated_rows(
     # local-currency total is gone from the statistics.
     assert usd.select(pl.col("order_total_amount").max() < 1000).item()
     assert df.filter(pl.col("currency_suspect")).height == MANIFEST["CUR1"]
+    (spanish,) = INJECTIONS["us_spanish_subject"]
+    assert df["checksum"][spanish] in kept
 
 
 def test_spend_waterfall_of_the_fixture(
@@ -300,6 +313,7 @@ def test_spend_waterfall_of_the_fixture(
     assert spend["currency_suspect"]["rows"] == MANIFEST["CUR1"]
     assert spend["non_rider_spend"]["rows"] == MANIFEST["K1.non_spend"]
     assert spend["superseded"]["rows"] == MANIFEST["U2.superseded"]
+    assert spend["micromobility"]["rows"] == MANIFEST["K1.micromobility"]
     assert spend["clean_usd_rider_spend"] == {
         "rows": MANIFEST["USD.rides"],
         "amount": USD_AMOUNT,
@@ -309,7 +323,8 @@ def test_spend_waterfall_of_the_fixture(
 def test_duplicate_checks_match_the_manifest(
     full_synthetic_derived: pl.DataFrame,
 ) -> None:
-    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    df = full_synthetic_derived
+    by_id = {r.check_id: r for r in run_checks(df.lazy())}
     u2, u2b, u3, u4 = (by_id[k] for k in ("U2", "U2b", "U3", "U4"))
     assert (u2.n_failed, u2.details["groups"]) == (
         MANIFEST["U2"],
@@ -324,6 +339,10 @@ def test_duplicate_checks_match_the_manifest(
     assert u4.details["rows"] == MANIFEST["U4.rows"]
     assert (u2b.passed, u2b.n_failed) == (True, 0)
     assert [r.passed for r in (u2, u3, u4)] == [False] * 3
+    # is_cross_panelist_copy: exactly the rows U3 counts (the two panelists' copies)
+    copies = {i for i, v in enumerate(df["is_cross_panelist_copy"]) if v}
+    assert copies == set(INJECTIONS["cross_panelist_duplicate"])
+    assert len(copies) == u3.n_failed == MANIFEST["U3"]
     assert u2.details["kind_pairs"] == [
         {"pair": "ride+ride", "groups": 2, "excess_spend": pytest.approx(16.98)},
         {"pair": "ride+tip_update", "groups": 1, "excess_spend": pytest.approx(12.38)},

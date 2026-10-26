@@ -120,6 +120,7 @@ def derived(*rows: Row) -> pl.DataFrame:
         pl.DataFrame(
             {
                 "merchant_name": ["Uber"] * len(rows),
+                "user_id": ["u"] * len(rows),
                 "from_domain": pl.Series([r.sender for r in rows], dtype=pl.String),
                 "email_subject": pl.Series([r.subject for r in rows], dtype=pl.String),
                 "product_description": pl.Series(
@@ -158,9 +159,39 @@ REASONS: list[tuple[str, Row, str | None]] = [
         Row("noreply@uber.com", description="UberX 6.80 mi | 11 min"),
         None,
     ),
+    # F6: a Spanish or Portuguese subject from a US sender is USD (an info tag
+    # only), with miles, with no distance at all, or with a Portuguese subject.
     (
-        "spanish subject",
+        "spanish subject, us sender, miles",
         Row("uber.us@uber.com", subject="Tu viaje del lunes por la tarde"),
+        None,
+    ),
+    (
+        "spanish subject, us sender, no distance",
+        Row(
+            "uber.us@uber.com",
+            subject="Tu viaje del lunes por la tarde",
+            description="Increase Tip",
+        ),
+        None,
+    ),
+    (
+        "portuguese subject, us city sender",
+        Row("receipts.macon@uber.com", subject="Sua viagem de segunda-feira"),
+        None,
+    ),
+    (
+        "spanish subject, us sender, km",
+        Row(
+            "uber.us@uber.com",
+            subject="Tu viaje del lunes por la tarde",
+            description="UberX 6.80 km | 11 min",
+        ),
+        "km_unit",
+    ),
+    (
+        "spanish subject, no sender",
+        Row(None, subject="Tu viaje del lunes por la tarde"),
         "foreign_language",
     ),
     (
@@ -231,7 +262,18 @@ def test_standalone_factories_equal_with_derived() -> None:
     )
     assert again.equals(alone)
     flags = df.select(foreign_subject()).to_series().to_list()
-    assert sum(flags) == 6  # the language rule is independent of the reason order
+    # the language tag is independent of the reason, and of the sender's country
+    assert sum(flags) == 10
+
+
+def test_foreign_subject_is_an_info_column_that_gates_nothing() -> None:
+    df = derived(
+        Row("uber.us@uber.com", subject="Tu viaje del lunes por la tarde"),
+        Row("noreply@uber.com", subject="Tu viaje del lunes por la tarde"),
+        Row("uber.us@uber.com"),
+    )
+    assert df["foreign_subject"].to_list() == [True, True, False]
+    assert df["currency_suspect"].to_list() == [False, True, False]
 
 
 # --- usd_rides ------------------------------------------------------------------
@@ -252,6 +294,11 @@ def money_frame() -> pl.DataFrame:
         ("suspect", {"suspect": True}),
         ("superseded", {"superseded": True}),
         ("not spend", {"spend": False, "kind": "freight"}),
+        ("micromobility", {"spend": False, "kind": "micromobility", "amount": 4.0}),
+        (
+            "suspect micromobility",
+            {"spend": False, "kind": "micromobility", "suspect": True},
+        ),
         ("null amount", {"amount": None}),
         ("suspect and superseded", {"suspect": True, "superseded": True}),
     ]
@@ -271,6 +318,7 @@ def money_frame() -> pl.DataFrame:
     return pl.DataFrame(
         {
             "case": [r["case"] for r in rows],
+            "receipt_kind": [r["kind"] for r in rows],
             "order_total_amount": pl.Series(
                 [r["amount"] for r in rows], dtype=pl.Float64
             ),
@@ -292,15 +340,21 @@ def test_waterfall_partitions_the_naive_total() -> None:
     df = money_frame()
     w = spend_waterfall(df.select(waterfall_exprs()).row(0, named=True))
     assert list(w)[: len(STEPS)] == list(STEPS)
-    # Six rows have an amount; the null one is in no step.
-    assert w["naive_total"] == {"rows": 6, "amount": 53.0}
-    assert w["currency_suspect"] == {"rows": 2, "amount": 20.0}
-    assert w["non_rider_spend"] == {"rows": 1, "amount": 10.0}
+    # Eight rows have an amount; the null one is in no step.
+    assert w["naive_total"] == {"rows": 8, "amount": 67.0}
+    assert w["currency_suspect"] == {"rows": 3, "amount": 30.0}
+    assert w["non_rider_spend"] == {"rows": 2, "amount": 14.0}
+    # Micromobility is a sub-line of the non-rider step (a suspect bike is in the
+    # suspect step), so it doesn't change the arithmetic below.
+    assert w["micromobility"] == {"rows": 1, "amount": 4.0}
     assert w["superseded"] == {"rows": 1, "amount": 10.0}
     assert w["clean_usd_rider_spend"] == {"rows": 2, "amount": 13.0}
     assert w["suspect_rider_spend"] == {"rows": 1, "amount": 10.0}
     taken = sum(w[k]["amount"] for k in STEPS[1:4])
     assert w["naive_total"]["amount"] - taken == w["clean_usd_rider_spend"]["amount"]
+    rows_taken = sum(w[k]["rows"] for k in STEPS[1:4])
+    assert w["naive_total"]["rows"] - rows_taken == w["clean_usd_rider_spend"]["rows"]
+    assert w["micromobility"]["amount"] <= w["non_rider_spend"]["amount"]
     assert w["clean_usd_rider_spend"]["rows"] == usd_rides(df).height
 
 
@@ -388,16 +442,17 @@ def test_cur1_details_count_reasons_countries_and_amounts() -> None:
         Row("uber.colombia@uber.com", subject="Tu viaje del lunes"),
         Row("noreply@uber.com", description="UberX 6.80 km | 11 min"),
         Row("noreply@uber.com", subject="Tu viaje del lunes por la tarde"),
+        Row("uber.us@uber.com", subject="Tu viaje del lunes por la tarde"),
     ]
     df = derived(*rows).with_columns(
-        order_total_amount=pl.Series([10.0, 1000.0, 2000.0, 3000.0, 5.0, 6.0]),
+        order_total_amount=pl.Series([10.0, 1000.0, 2000.0, 3000.0, 5.0, 6.0, 7.0]),
         email_time=pl.lit(None, dtype=pl.Datetime("ms")),
         update_time=pl.lit(None, dtype=pl.Datetime("ms")),
-        checksum=pl.Series([str(i) for i in range(6)]),
+        checksum=pl.Series([str(i) for i in range(7)]),
     )
     res = currency_suspect_check(supersede_flags(df).lazy())
     assert (res.check_id, res.severity.value, res.passed) == ("CUR1", "warn", False)
-    assert (res.n_failed, res.n_evaluated) == (5, 6)
+    assert (res.n_failed, res.n_evaluated) == (5, 7)
     assert res.details["by_reason"] == {
         "non_us_sender": {"rows": 3, "amount": 6000.0},
         "foreign_language": {"rows": 1, "amount": 6.0},
@@ -416,11 +471,19 @@ def test_cur1_details_count_reasons_countries_and_amounts() -> None:
     assert res.details["suspect_rider_spend"] == {"rows": 5, "amount": 6011.0}
     spend = res.details["spend"]
     assert isinstance(spend, dict)
-    assert spend["clean_usd_rider_spend"] == {"rows": 1, "amount": 10.0}
+    assert spend["clean_usd_rider_spend"] == {"rows": 2, "amount": 17.0}
+    assert spend["micromobility"] == {"rows": 0, "amount": 0.0}
+    # F6: the US sender's Spanish subject is tagged, not suspect (and is USD spend)
+    tag = res.details["foreign_subject"]
+    assert isinstance(tag, dict)
+    assert (tag["rows"], tag["amount"]) == (1, 7.0)
 
 
 def test_cur1_passes_when_nothing_is_suspect() -> None:
-    df = derived(Row("uber.us@uber.com")).with_columns(
+    df = derived(
+        Row("uber.us@uber.com"),
+        Row("uber.us@uber.com", subject="Tu viaje del lunes por la tarde"),
+    ).with_columns(
         order_total_amount=pl.lit(4.0),
         email_time=pl.lit(None, dtype=pl.Datetime("ms")),
         update_time=pl.lit(None, dtype=pl.Datetime("ms")),

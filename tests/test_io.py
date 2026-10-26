@@ -439,7 +439,7 @@ def test_crlf_split_across_a_chunk_boundary_is_counted_once(
     # second; missing the pair would leave a lone "\n" and report "mixed".
     path = tmp_path / "boundary.csv"
     path.write_bytes(b"x" * 1023 + b"\r\n" + b"a\r\n")
-    size, _, has_bom, ending = io_module._scan_bytes(path)
+    size, _, has_bom, ending, _ = io_module._scan_bytes(path)
     assert (size, has_bom, ending) == (1023 + 2 + 3, False, "crlf")
 
 

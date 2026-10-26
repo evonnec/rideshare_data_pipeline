@@ -41,7 +41,7 @@ from rideshare_data_pipeline.schema import (
     csv_schema,
 )
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 """Bump when the layout of an entry or of index.json changes."""
 
 DATA_FILE = "data.parquet"
@@ -181,6 +181,7 @@ def _try_load(cache_dir: Path, sha256: str) -> Loaded | None:
             has_bom=bool(csv["bom"]),
             line_ending=ending,
             header=EXPECTED_COLUMNS,
+            blank_lines=int(csv["blank_lines"]),
         )
         member = csv["member"]
         if member is not None and not isinstance(member, str):
@@ -244,6 +245,7 @@ def _store(cache_dir: Path, source: _Source, loaded: Loaded) -> None:
             "sha256": facts.sha256,
             "bom": facts.has_bom,
             "line_ending": facts.line_ending,
+            "blank_lines": facts.blank_lines,
         },
         "rows": df.height,
         "created": datetime.now(UTC).isoformat(timespec="seconds"),

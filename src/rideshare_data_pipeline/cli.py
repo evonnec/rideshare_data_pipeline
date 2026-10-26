@@ -50,6 +50,7 @@ from rideshare_data_pipeline.schema import EXPECTED_COLUMNS, casts
 EXIT_OK = 0
 EXIT_GATED = 1
 EXIT_INPUT_ERROR = 2
+EXIT_INTERNAL_ERROR = 3
 
 CACHE_ENV = "RIDESHARE_QC_CACHE"
 
@@ -63,7 +64,8 @@ Read the rideshare e-receipt CSV (or an archive holding it): check its UTF-8
 encoding and header, cast the columns to their types, run the QC checks and write
 into DIR: report.json, report.md, samples/<check>.parquet for each failed check,
 and <input stem>.parquet with every column and row (unless --drop-columns names
-columns to leave out). Reports hold hashed user ids and masked subjects only, but
+columns to leave out). Blank lines are dropped and counted in the report.
+Reports hold hashed user ids and masked subjects only, but
 keep DIR outside the repository anyway.
 
 With --cache-dir (or the environment variable RIDESHARE_QC_CACHE) the validated,
@@ -77,9 +79,16 @@ exit status:
   {EXIT_OK}  every check that gates passed
   {EXIT_GATED}  an error-severity check failed (with --fail-on warn, a failed warn
       check too); info checks never gate. The reports and the Parquet are still written.
-  {EXIT_INPUT_ERROR}  input error (bad encoding or header, values that don't cast to
-      their column's type, bad config file), invalid arguments, or unwritable
-      output. Nothing is written when the input can't be read.
+  {EXIT_INPUT_ERROR}  input error (bad encoding or header, a damaged archive, values
+      that don't cast to their column's type, including non-finite numbers and
+      years outside 1 to 9999, a bad config file), invalid arguments, or
+      unwritable output. Nothing is written when the input can't be read.
+  {EXIT_INTERNAL_ERROR}  internal error: a bug in this tool, reported as one line on
+      stderr (please report it). Not a verdict on the data.
+
+Files are written atomically (to a temporary name, then renamed), so a file is
+never partial. DIR may hold files from other runs: report.json's "outputs" lists
+the files of this run.
 """
 
 
@@ -275,6 +284,8 @@ def run(
         config=config,
         member=member,
         cache=loaded.cache,
+        blank_lines=facts.blank_lines,
+        parquet_name=output.name,
     )
     written = write_report(out_dir, results, info, code)
     return Summary(
@@ -327,6 +338,8 @@ def format_summary(summary: Summary) -> str:
         "duplicate rows": "disabled" if duplicates is None else f"{duplicates:,}",
         "wrote": f"{summary.output} ({summary.output_columns} columns)",
     }
+    if facts.blank_lines:
+        lines["blank lines"] = f"{facts.blank_lines:,} (dropped)"
     if summary.cache != "off":
         lines["cache"] = summary.cache
     width = max(map(len, lines)) + 2
@@ -367,6 +380,11 @@ def format_outcome(summary: Summary) -> str:
     return "\n".join(lines)
 
 
+def _first_line(err: Exception) -> str:
+    """The first line of the message; polars errors append the whole query plan."""
+    return str(err).partition("\n")[0]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line and return its exit status."""
     parser = build_parser()
@@ -391,6 +409,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (InputError, OSError) as err:
         print(f"rideshare-qc: error: {err}", file=sys.stderr)
         return EXIT_INPUT_ERROR
+    except Exception as err:
+        # Anything else is a bug here, not a fault in the input: say so with its
+        # own status (3), distinct from a failed check (1). KeyboardInterrupt and
+        # SystemExit are not Exceptions and pass through.
+        print(
+            f"rideshare-qc: internal error: {type(err).__name__}: "
+            f"{_first_line(err)} (please report)",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
     print(format_summary(summary))
     print()
     print(format_checks(summary.results))

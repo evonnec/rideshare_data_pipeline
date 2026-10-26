@@ -162,6 +162,52 @@ jobs:
           uv run --isolated --no-project --with "$wheel" \
             python -I -c 'import importlib, sys; m = importlib.import_module(sys.argv[1]); print(m.__name__, "imported from", m.__file__)' "$PACKAGE"
           uv run --isolated --no-project --with "$wheel" "$ENTRY_POINT" --help
+      # The sdist must carry what a downstream build needs to run the suite.
+      - name: List the sdist and check its contents
+        run: |
+          shopt -s nullglob
+          sdists=(dist/*.tar.gz)
+          if (( ${#sdists[@]} != 1 )); then
+            echo "::error::Expected exactly one sdist in dist/, found ${#sdists[@]}"
+            exit 1
+          fi
+          listing=$(tar -tzf "${sdists[0]}")
+          echo "$listing"
+          for want in tests/test_cli.py tools/check_no_data.py qc.example.toml uv.lock; do
+            if ! grep -qE "^[^/]+/${want}$" <<< "$listing"; then
+              echo "::error::The sdist is missing ${want}"
+              exit 1
+            fi
+          done
+      # End to end on the built wheel (not the checkout): the synthetic fixture has
+      # planted errors, so the run must exit 1 (a gated failure; 2 or 3 would be a
+      # crash), and report.json must validate against the schema shipped in the wheel.
+      - name: Run the wheel end to end on the synthetic fixture
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          wheel=${wheels[0]}
+          work=$(mktemp -d)
+          # The generator script imports only the package and polars, both in the wheel's environment.
+          uv run --isolated --no-project --with "$wheel" \
+            python -I tests/fixtures/make_synthetic.py "$work/synthetic.csv"
+          status=0
+          uv run --isolated --no-project --with "$wheel" "$ENTRY_POINT" run \
+            --input "$work/synthetic.csv" --out "$work/out" || status=$?
+          if (( status != 1 )); then
+            echo "::error::Expected exit status 1 (the planted error check), got $status"
+            exit 1
+          fi
+          uv run --isolated --no-project --with "$wheel" --with jsonschema \
+            python -I -c '
+          import importlib.resources, json, sys
+          import jsonschema
+          schema = json.loads(importlib.resources.files(sys.argv[1]).joinpath("report.schema.json").read_text("utf-8"))
+          report = json.load(open(sys.argv[2] + "/report.json", encoding="utf-8"))
+          jsonschema.validate(report, schema, cls=jsonschema.Draft202012Validator)
+          assert report["exit_code"] == 1, report["exit_code"]
+          print("report.json is schema-valid;", report["summary"])
+          ' "$PACKAGE" "$work/out"
       - name: Upload dist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

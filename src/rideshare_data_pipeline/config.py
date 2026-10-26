@@ -13,7 +13,12 @@ The TOML file has four top-level keys and one table per check::
     enabled = true  # false drops the check from the run and the report
 
 Unknown keys or check names are errors (ConfigError, exit status 2), so a typo
-can't silently do nothing. Everything here is pure; ``load_config`` is the only
+can't silently do nothing. So is a config that leaves no check enabled, and
+``enabled = false`` for ``cast_failures``: that check records that the strict parse
+passed (a value that doesn't convert aborts the run with exit 2 before any check
+runs), so switching it off would change nothing but the report.
+
+Everything here is pure; ``load_config`` is the only
 function that touches the file system.
 """
 
@@ -64,6 +69,8 @@ KNOWN_CHECKS: tuple[str, ...] = (
 _FAIL_ON = (Severity.ERROR, Severity.WARN)
 _TOP_KEYS = frozenset({"sample_limit", "fail_on", "min_rows", "max_rows", "checks"})
 _CHECK_KEYS = frozenset({"max_failed_rate", "severity", "enabled"})
+# Checks that cannot be switched off.
+ALWAYS_ENABLED: frozenset[str] = frozenset({"cast_failures"})
 
 
 class ConfigError(InputError):
@@ -139,6 +146,13 @@ def _override(name: str, table: object) -> CheckOverride:
     if not isinstance(enabled, bool):
         msg = f"{where} enabled: expected true or false, got {enabled!r}"
         raise ConfigError(msg)
+    if name in ALWAYS_ENABLED and not enabled:
+        msg = (
+            f"{where} enabled: {name} can't be disabled; a value that doesn't "
+            "convert aborts the run with exit status 2 whatever the config says, "
+            "and the check only records that the strict parse passed"
+        )
+        raise ConfigError(msg)
     return CheckOverride(
         max_failed_rate=None if rate is None else float(rate),
         severity=None
@@ -179,6 +193,14 @@ def parse_config(data: Mapping[str, object]) -> QCConfig:
         msg = "checks: expected a table of [checks.<name>] tables"
         raise ConfigError(msg)
     _unknown(tables, KNOWN_CHECKS, "[checks]")
+    off = {
+        name
+        for name, table in tables.items()
+        if isinstance(table, dict) and table.get("enabled", True) is False
+    }
+    if not set(KNOWN_CHECKS) - off:
+        msg = "checks: every check is disabled; at least one must stay enabled"
+        raise ConfigError(msg)
     return QCConfig(
         sample_limit=limit,
         fail_on=fail_on,

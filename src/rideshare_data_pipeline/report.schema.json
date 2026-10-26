@@ -51,6 +51,7 @@
         "started": { "type": "string", "description": "UTC, ISO 8601." },
         "finished": { "type": "string", "description": "UTC, ISO 8601." },
         "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "blank_lines": { "type": "integer", "minimum": 0, "description": "Empty lines of the CSV that was read. They are dropped on reading, not an error." },
         "cache": { "enum": ["hit", "miss", "off"], "description": "Whether the typed frame came from the Parquet cache (hit), was read and then cached (miss), or no cache was configured (off)." },
         "config": {
           "type": "object",
@@ -148,13 +149,24 @@
         "naive_total": { "$ref": "#/$defs/spend_cell" },
         "currency_suspect": { "$ref": "#/$defs/spend_cell" },
         "non_rider_spend": { "$ref": "#/$defs/spend_cell" },
+        "micromobility": { "$ref": "#/$defs/spend_cell", "description": "Bikes and scooters: the part of non_rider_spend that is micromobility (excluded; not rider spend). A sub-line, not a further deduction." },
         "superseded": { "$ref": "#/$defs/spend_cell" },
         "clean_usd_rider_spend": { "$ref": "#/$defs/spend_cell" },
         "suspect_rider_spend": { "$ref": "#/$defs/spend_cell" },
         "note": { "type": "string", "description": "The currency caveat on the suspect amounts." }
       }
     },
-    "exit_code": { "enum": [0, 1], "description": "The exit status of the run (2 is never written: input errors produce no report)." }
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parquet", "samples"],
+      "description": "The files this run wrote into the output directory. The directory may also hold files from other runs; only these belong to this report.",
+      "properties": {
+        "parquet": { "type": ["string", "null"], "description": "File name of the Parquet, relative to the report directory." },
+        "samples": { "type": "array", "items": { "type": "string" }, "description": "Sample files written by this run, relative to the report directory." }
+      }
+    },
+    "exit_code": { "enum": [0, 1], "description": "The exit status of the run (2 and 3 are never written: input errors and internal errors produce no report)." }
   },
   "$defs": {
     "spend_cell": {
