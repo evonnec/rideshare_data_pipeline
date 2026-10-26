@@ -408,8 +408,8 @@ class FileFacts:
 
     blank_lines: int = 0
     """Lines that are empty once any ``\\r`` is removed. They are dropped on reading
-    (read_raw), not an error. Counted from the bytes, so a blank line inside a quoted
-    field is counted too."""
+    (by position, see blank_rows), not an error; a row of commas alone is not blank.
+    Counted from the bytes, so a blank line inside a quoted field is counted too."""
 
 
 # A UTF-8 pass over a ~0.9 GB file at this chunk size costs about a second;
@@ -684,6 +684,72 @@ def check_ragged_rows(path: StrPath, name: str | None = None) -> None:
         locate_ragged_row(path, name)
 
 
+def _blank_rows_by_lines(path: Path) -> list[int] | None:
+    """Data-row indices of the blank lines, from one vectorized pass over the lines.
+
+    Reads each physical line as one string (blank lines are null), as the ragged
+    check does. Physical lines equal records only if no quoted field spans lines,
+    so a line with an odd number of quotes (a record continuing, or a stray quote)
+    makes the mapping ambiguous: None is returned and the caller takes the exact
+    path. The header is line 0, so data row ``i`` is line ``i + 1``.
+    """
+    line = pl.col("line")
+    odd = (line.str.count_matches(_QUOTE, literal=True) % 2 == 1).fill_null(False)
+    lines = pl.scan_csv(
+        path,
+        has_header=False,
+        separator=_NO_SEPARATOR,
+        quote_char=None,
+        infer_schema=False,
+        new_columns=["line"],
+    )
+    try:
+        hits = (
+            lines.with_row_index("n")
+            .select("n", blank=line.is_null(), odd=odd)
+            .filter(pl.col("blank") | pl.col("odd"))
+            .collect(engine="streaming")
+        )
+    except pl.exceptions.PolarsError:
+        return None
+    if hits["odd"].any():
+        return None
+    return [n - 1 for n in hits["n"] if n >= 1]
+
+
+def _blank_rows_by_records(path: Path) -> list[int]:
+    """Data-row indices of the blank lines, exactly, with the stdlib csv reader.
+
+    Quote-aware: a blank line inside a quoted field is part of its record, not a
+    row of its own. Pure Python, several seconds per million rows.
+    """
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return [n - 1 for n, record in enumerate(csv.reader(f)) if n and not record]
+
+
+def blank_rows(path: StrPath, blank_lines: int) -> list[int]:
+    """0-based data-row indices (as polars reads them) of the blank lines.
+
+    polars has no option to skip blank lines: it reads each as a row of nulls, and
+    a row of 32 commas is indistinguishable by value, so only position tells them
+    apart. Only called when the byte scan found blank lines (`blank_lines` > 0), so
+    a file without any pays nothing. The vectorized line pass is used when its
+    count agrees with the byte scan's; otherwise (a quoted field spans lines, or
+    an odd line break) the exact csv-module locator runs, which is slow.
+    """
+    path = Path(path)
+    found = _blank_rows_by_lines(path)
+    if found is not None and len(found) == blank_lines:
+        return found
+    return _blank_rows_by_records(path)
+
+
+def _without_rows(df: pl.DataFrame, rows: Sequence[int]) -> pl.DataFrame:
+    """Drop the rows at the given 0-based positions (any past the end are ignored)."""
+    drop = pl.Series("drop", rows, dtype=pl.Int64)
+    return df.filter(~pl.int_range(df.height, eager=True).is_in(drop.implode()))
+
+
 def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFrame:
     """Lazily scan the CSV with every column as String; nothing is inferred.
 
@@ -699,13 +765,17 @@ def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFra
     # read_typed runs check_ragged_rows first, which catches both with a line number.
     lf = pl.scan_csv(path, infer_schema=False)
     if facts.blank_lines == 0:
-        # The byte scan found no blank line, so skip a 33-column filter over
-        # every row (a few tenths of a second on a ~2M-row file).
+        # The byte scan found no blank line: nothing to drop, nothing to pay.
         return lf
-    # polars has no option to skip blank lines: it reads each as a row of nulls, so
-    # rows with no value at all are dropped here (FileFacts.blank_lines counts
-    # them). No real row is all-null: C1's required fields are never null.
-    return lf.filter(pl.any_horizontal(pl.all().is_not_null()))
+    # A blank line is read as a row of nulls, so it is dropped by position (see
+    # blank_rows). A row of commas alone is a real, all-empty record: it stays,
+    # and C1 flags it.
+    drop = pl.Series("drop", blank_rows(path, facts.blank_lines), dtype=pl.Int64)
+    return (
+        lf.with_row_index("_row")
+        .filter(~pl.col("_row").is_in(drop.implode()))
+        .drop("_row")
+    )
 
 
 def typed(lf: pl.LazyFrame) -> pl.LazyFrame:
@@ -795,11 +865,9 @@ def read_typed(
         raise CastError(failures)
     df = frame.drop(flags)
     if facts.blank_lines:
-        # polars has no option to skip blank lines: it reads each as a row of nulls,
-        # so rows with no value at all are dropped here (FileFacts.blank_lines counts
-        # them). No real row is all-null: C1's required fields are never null, and
-        # a row whose only values fail their cast has just raised CastError.
-        df = df.filter(pl.any_horizontal(pl.all().is_not_null()))
+        # Dropped by position, so an all-empty record (a row of commas) is kept for
+        # C1; see blank_rows.
+        df = _without_rows(df, blank_rows(path, facts.blank_lines))
     return df, facts
 
 
