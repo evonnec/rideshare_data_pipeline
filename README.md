@@ -13,7 +13,7 @@ This first version validates the file's UTF-8 encoding and header, reads every c
 - **Real data is never committed**: not the raw file, extracts of it, or anything derived from it. `.gitignore` blocks the usual data and archive formats everywhere except small synthetic fixtures under `tests/fixtures/`, and the tests build their synthetic files in a temporary directory.
 - CI enforces this: `tools/check_no_data.py` fails the build if a tracked file is over 1 MB, if a data or archive file is tracked outside `tests/fixtures/`, or if a tracked CSV outside it has the input schema's header. Run `uv run python tools/check_no_data.py` locally, or use it as a pre-commit hook.
 - Point the CLI at a file on your machine with `--input`. The opt-in real-data test reads the path in the `RIDESHARE_QC_DATA` environment variable.
-- The CLI writes only to the `--out` directory you name. Archives are extracted to a temporary directory that is deleted when the run ends.
+- The CLI writes only to the `--out` directory you name, plus the cache directory if (and only if) you opt in with `--cache-dir` or `RIDESHARE_QC_CACHE`. Archives are extracted to a temporary directory that is deleted when the run ends. The cache holds a typed copy of the real data as Parquet, so keep it outside the repository (`/.cache/` is gitignored, but a directory elsewhere is safer); see [Cache](#cache).
 - Reports contain the input's base name and SHA-256, aggregate counts, and failing-row samples limited to the columns each rule chooses (hashed `user_id`, order number, times, amounts, receipt kind; no free-text subjects, and never the sender address, whose local part can be a person's). The one place subject text appears is the `unclassified_subject_templates` check, which lists at most 20 normalised templates (masks, digits, dates and weekdays replaced) of subjects no rule recognised. They still describe real data: write them to a directory outside the repository (`.gitignore` blocks `/reports/`), and share them like the data.
 
 ## Quick start
@@ -29,14 +29,17 @@ uv run rideshare-qc run --input /path/to/receipts.csv --out ~/qc-reports/receipt
 
 ```text
 rideshare-qc run --input PATH --out DIR [--config FILE] [--fail-on {error,warn}] [--drop-columns A,B]
+                  [--cache-dir DIR] [--refresh-cache]
 rideshare-qc --help | --version
 ```
 
-- `--input PATH`: the CSV, or a `.tar.bz2`, `.tar.gz`, `.tar.xz`, `.tar` or `.zip` archive that holds exactly one CSV (macOS `._*` sidecar files are ignored).
+- `--input PATH`: the CSV, or a `.tar.bz2`, `.tar.gz`, `.tar.xz`, `.tar` or `.zip` archive that holds exactly one CSV (macOS `._*` sidecar files are ignored; see [Archives](#archives)).
 - `--out DIR`: where everything is written (created if missing): `report.json`, `report.md`, `samples/<check>.parquet` (one per failed check that has sample rows), and `<input stem>.parquet` (zstd; the curated Parquet with per-row flags is planned in #22).
 - `--config FILE`: a TOML file with thresholds, severities and on/off switches (see [Configuration](#configuration)).
 - `--fail-on {error,warn}`: the lowest severity whose failure exits 1. Overrides the config's `fail_on`; the default is `error`.
 - `--drop-columns A,B`: columns to leave out of the Parquet file. By default every column and every row is kept. The checks only report, and nothing is dropped unless you ask.
+- `--cache-dir DIR`: keep (and reuse) a typed Parquet copy of the input in DIR. Also read from the environment variable `RIDESHARE_QC_CACHE` when the flag is absent; with neither, no cache is used. See [Cache](#cache).
+- `--refresh-cache`: rebuild the cache entry for this input even if a valid one exists (needs a cache directory).
 
 It prints a short summary, one line per check, and the paths written, for example:
 
@@ -67,6 +70,34 @@ wrote: reports/report.md
 ```
 
 A row rule passes while its failure rate is at most its threshold (`max_failed_rate`, 0 by default); a null never counts as a failure. Info checks always pass.
+
+## Archives
+
+An archive (`.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` or `.zip`) must hold exactly one CSV. Only that member is extracted, streamed to `data.csv` in a temporary directory that is deleted when the run ends, so no member name ever reaches the file system and nothing else in the archive is written.
+
+- Directories and macOS AppleDouble sidecars (`._*`, also under `__MACOSX/`) are ignored.
+- No CSV, or more than one, raises `ArchiveError` (exit 2), and the message lists the members (at most 20, then "and N more").
+- The CSV member is rejected if it is a symlink, a hardlink or any non-regular file, or if its name is absolute or has a `..` component.
+- A tar is read in one sequential pass (a listing of a compressed tar means decompressing it, and seeking back would decompress it again).
+
+## Cache
+
+Decompressing the bz2 sample takes about 20 s per run. With a cache directory, the first run on an input saves the validated, typed frame as Parquet and later runs read that instead. It is opt-in: without `--cache-dir` (or `RIDESHARE_QC_CACHE`) nothing is cached and nothing is written but `--out`. The flag wins over the variable; an empty variable means no cache.
+
+```text
+<cache>/<sha256 of the input file as given>/data.parquet   the typed frame (zstd)
+<cache>/<sha256 of the input file as given>/meta.json      format version, tool version, schema fingerprint,
+                                                           input name/size/mtime_ns/sha256, the CSV's size,
+                                                           sha256, BOM and line endings, row count, created
+<cache>/index.json                                         resolved path -> size, mtime_ns, sha256
+```
+
+- **Validity**: an entry is used only if its format version and schema fingerprint match. The fingerprint hashes the 33 column names, the dtypes and the timestamp formats, so a change to the schema invalidates old entries and a release that leaves it alone does not (the tool version is recorded but is not part of the key). Anything else wrong with an entry (bad JSON, unreadable Parquet, a row count that disagrees) is a warning on stderr and a rebuild.
+- **Fast lookup**: the input is statted and looked up in `index.json`. If the path, size and mtime match and the entry is valid, the input is not read at all. Otherwise the input (the archive, or the CSV) is hashed, which still finds an entry for a touched or copied file with the same bytes; failing that the run takes the normal path (extract, validate, read, cast) and writes the entry. The trade-off: an in-place edit that keeps both the size and the mtime would be missed. That is very unlikely; use `--refresh-cache` to rebuild regardless.
+- **Only validated data is cached**: a run that fails with an input error (bad header, encoding or casts) writes no entry. Writes are atomic (a temporary directory, then a rename), so a crash or a concurrent run never leaves a half-written entry. A cache directory that can't be written is a warning; caching never fails a run.
+- **Same results**: the report is the same as an uncached run's apart from the timings and `run.cache` (`"hit"`, `"miss"` or `"off"`).
+- The same data given as a CSV and as an archive gives two entries (the key is the file as given).
+- The cache holds real data, not a derived summary: keep it outside the repository and delete it when you are done.
 
 ## Receipt kinds
 
@@ -161,7 +192,7 @@ Unknown keys and unknown check names are errors (exit 2), so a typo can't silent
 {"schema_version": 1,
  "run": {tool_version, input_name (base name), input_sha256, input_size_bytes, bom, line_ending,
          rows, panelists (distinct user_id), window {start, end} (email_time, ISO), started, finished,
-         elapsed_seconds, config {fail_on, sample_limit, checks {<name>: {threshold, severity}}}},
+         elapsed_seconds, cache (hit|miss|off), config {fail_on, sample_limit, checks {<name>: {threshold, severity}}}},
  "summary": {errors_failed, warnings_failed, info, passed, total},
  "composition": {rows, merchants, kinds: [{kind, rider_spend, total, by_merchant}]}  (optional),
  "spend": {naive_total, currency_suspect, non_rider_spend, superseded, clean_usd_rider_spend,
@@ -203,7 +234,8 @@ src/rideshare_data_pipeline/
   report.py           report.json and report.md rendering, samples/<check>.parquet, exit-code policy
   report.schema.json  JSON Schema for report.json (package data)
   schema.py           the 33 expected columns, the raw all-String schema, the casts and their formats
-  io.py               archive extraction (tar filter="data", zip), header and UTF-8 validation,
+  cache.py            the opt-in Parquet cache: load_typed, index, atomic writes, schema fingerprint
+  io.py               extract_member (exactly one safe CSV from a tar or zip), header and UTF-8 validation,
                       the raw scan (UTF-8 validation, SHA-256, line endings in one pass), non-strict typing with per-column cast-failure
                       counts, CSV/Parquet writers
   checks/
@@ -222,7 +254,7 @@ src/rideshare_data_pipeline/
 tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
-  test_schema.py  test_io.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
+  test_schema.py  test_io.py  test_cache.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
   test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```

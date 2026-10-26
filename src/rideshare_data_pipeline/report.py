@@ -47,6 +47,8 @@ class RunInfo:
     finished: str
     elapsed_seconds: float
     config: QCConfig
+    cache: str = "off"
+    """"hit", "miss" or "off" (no cache directory configured)."""
 
 
 def gates(result: CheckResult, fail_on: Severity) -> bool:
@@ -198,6 +200,7 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
             "started": run.started,
             "finished": run.finished,
             "elapsed_seconds": round(run.elapsed_seconds, 3),
+            "cache": run.cache,
             "config": {
                 "fail_on": run.config.fail_on.value,
                 "sample_limit": run.config.sample_limit,

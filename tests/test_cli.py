@@ -4,7 +4,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,24 +34,6 @@ def summary(stdout: str) -> dict[str, str]:
     lines = stdout.split("\n\n", 1)[0].splitlines()
     pairs = (line.split(":", 1) for line in lines)
     return {label.strip(): value.strip() for label, value in pairs}
-
-
-@pytest.fixture
-def empty_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Run the test from an empty working directory (to show nothing lands there)."""
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
-    monkeypatch.chdir(cwd)
-    return cwd
-
-
-@pytest.fixture
-def private_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point tempfile at an empty directory, to check what extraction leaves."""
-    tmp = tmp_path / "tmp"
-    tmp.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp))
-    return tmp
 
 
 # --- help and version ------------------------------------------------------------
@@ -358,8 +339,8 @@ def _corrupt(tmp_path: Path) -> Path:
         (_bad_value, r"order_time: 1\n"),
         (_bad_header, "header doesn't match the schema: missing 'merchant_name'"),
         (_unsupported, "unsupported input 'data.json'"),
-        (_traversal, "can't extract evil.tar.bz2"),
-        (_no_csv, "expected exactly one CSV in nothing.zip, found 0"),
+        (_traversal, "unsafe member '../evil.csv' in evil.tar.bz2"),
+        (_no_csv, "expected exactly one .*csv. member in nothing.zip, found none"),
         (_corrupt, "can't extract corrupt.tar.bz2"),
     ],
     ids=[
@@ -451,3 +432,43 @@ def test_summary_reports_encoding_bom_and_line_endings(
     assert summary(capsys.readouterr().out)["encoding"] == (
         "UTF-8, BOM, LF line endings"
     )
+
+
+# --- nothing lands in the working directory ----------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["no-cache", "cache-flag", "cache-env"])
+@pytest.mark.parametrize("name", ["Data.csv", "Data.tar.bz2", "Data.zip"])
+def test_nothing_is_written_to_the_cwd_in_any_mode(
+    mode: str,
+    name: str,
+    synthetic_csv: Path,
+    tmp_path: Path,
+    private_tmp: Path,
+    empty_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    members = {"Data.csv": synthetic_csv.read_bytes()}
+    source = tmp_path / "inputs" / name
+    source.parent.mkdir()
+    if name.endswith(".csv"):
+        source.write_bytes(members["Data.csv"])
+    elif name.endswith(".zip"):
+        make_zip(source, members)
+    else:
+        make_tar(source, members)
+    args = ["run", "--input", str(source), "--out", str(tmp_path / "out")]
+    cache = tmp_path / "cache"
+    monkeypatch.delenv("RIDESHARE_QC_CACHE", raising=False)
+    if mode == "cache-flag":
+        args += ["--cache-dir", str(cache)]
+    elif mode == "cache-env":
+        monkeypatch.setenv("RIDESHARE_QC_CACHE", str(cache))
+
+    for _ in range(2):  # a miss, then a hit
+        assert main(args) == 0
+
+    assert list(empty_cwd.iterdir()) == []
+    assert list(private_tmp.iterdir()) == []
+    assert cache.exists() == (mode != "no-cache")
+    assert sorted(p.name for p in source.parent.iterdir()) == [name]

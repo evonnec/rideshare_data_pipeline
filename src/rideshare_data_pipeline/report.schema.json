@@ -38,6 +38,7 @@
         "started": { "type": "string", "description": "UTC, ISO 8601." },
         "finished": { "type": "string", "description": "UTC, ISO 8601." },
         "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "cache": { "enum": ["hit", "miss", "off"], "description": "Whether the typed frame came from the Parquet cache (hit), was read and then cached (miss), or no cache was configured (off)." },
         "config": {
           "type": "object",
           "additionalProperties": false,

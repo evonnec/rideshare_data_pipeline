@@ -4,9 +4,11 @@ import datetime as dt
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -24,15 +26,14 @@ from synthetic import (
 
 import rideshare_data_pipeline.io as io_module
 from rideshare_data_pipeline.io import (
+    ArchiveError,
     CastError,
     EncodingError,
     FileFacts,
     HeaderError,
     InputError,
     cast_failures,
-    extract_archive,
-    extract_tar,
-    extract_zip,
+    extract_member,
     input_csv,
     input_stem,
     inspect_csv,
@@ -490,107 +491,164 @@ def test_write_parquet_keeps_every_column_and_dtype(
 # --- archives ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("suffix", [".tar.bz2", ".tar.gz", ".tar.xz", ".tar"])
-def test_extract_tar(tmp_path: Path, suffix: str) -> None:
-    archive = make_tar(tmp_path / f"data{suffix}", {"dir/data.csv": CSV_BYTES})
-    extract_tar(archive, tmp_path / "dest")
-    assert (tmp_path / "dest" / "dir" / "data.csv").read_bytes() == CSV_BYTES
-
-
-@pytest.mark.parametrize(
-    ("members", "symlinks"),
-    [
-        ({"../evil.csv": CSV_BYTES}, {}),
-        ({"ok/../../evil.csv": CSV_BYTES}, {}),
-        ({}, {"evil.csv": "../outside.csv"}),
-        ({}, {"evil.csv": "/etc/passwd"}),
-    ],
-    ids=["dotdot", "nested-dotdot", "symlink-up", "symlink-absolute"],
-)
-def test_extract_tar_rejects_members_outside_the_destination(
-    tmp_path: Path, members: dict[str, bytes], symlinks: dict[str, str]
-) -> None:
-    archive = make_tar(tmp_path / "evil.tar.bz2", members, symlinks)
-    dest = tmp_path / "a" / "dest"
-    with pytest.raises(tarfile.FilterError):
-        extract_tar(archive, dest)
-    assert not (tmp_path / "a" / "evil.csv").exists()
-    assert not (dest / "evil.csv").exists()
-
-
-def test_extract_tar_strips_absolute_member_paths(tmp_path: Path) -> None:
-    archive = make_tar(tmp_path / "abs.tar.bz2", {"/abs/data.csv": CSV_BYTES})
-    extract_tar(archive, tmp_path / "dest")
-    assert (tmp_path / "dest" / "abs" / "data.csv").read_bytes() == CSV_BYTES
-
-
-def test_extract_zip(tmp_path: Path) -> None:
-    archive = make_zip(tmp_path / "data.zip", {"dir/data.csv": CSV_BYTES})
-    extract_zip(archive, tmp_path / "dest")
-    assert (tmp_path / "dest" / "dir" / "data.csv").read_bytes() == CSV_BYTES
-
-
-def test_extract_zip_keeps_dotdot_members_inside_the_destination(
+def build_archive(
     tmp_path: Path,
+    kind: str,
+    members: dict[str, bytes],
+    symlinks: dict[str, str] | None = None,
+) -> Path:
+    """A zip, or a tar of the given suffix, holding members (and tar symlinks)."""
+    if kind == ".zip":
+        return make_zip(tmp_path / "data.zip", members)
+    return make_tar(tmp_path / f"data{kind}", members, symlinks)
+
+
+ARCHIVE_KINDS = [".tar.bz2", ".tar.gz", ".tar.xz", ".tar", ".zip"]
+
+
+@pytest.mark.parametrize("kind", ARCHIVE_KINDS)
+def test_extract_member_writes_the_one_csv_under_a_fixed_name(
+    tmp_path: Path, kind: str
 ) -> None:
-    archive = make_zip(tmp_path / "evil.zip", {"../evil.csv": CSV_BYTES})
-    dest = tmp_path / "a" / "dest"
-    extract_zip(archive, dest)
-    assert not (tmp_path / "a" / "evil.csv").exists()
-    assert (dest / "evil.csv").read_bytes() == CSV_BYTES
-
-
-def test_extract_archive_returns_the_single_csv(tmp_path: Path) -> None:
-    archive = make_tar(
-        tmp_path / "data.tar.bz2", {"nested/data.csv": CSV_BYTES, "README": b"hi"}
+    archive = build_archive(
+        tmp_path, kind, {"dir/Data.CSV": CSV_BYTES, "README": b"hi", "dir/x.txt": b""}
     )
-    assert extract_archive(archive, tmp_path / "dest") == (
-        tmp_path / "dest" / "nested" / "data.csv"
-    )
+    dest = tmp_path / "dest"
+    assert extract_member(archive, dest) == dest / "data.csv"
+    assert [p.name for p in dest.rglob("*")] == ["data.csv"]
+    assert (dest / "data.csv").read_bytes() == CSV_BYTES
 
 
-def test_extract_archive_ignores_macos_sidecars(tmp_path: Path) -> None:
-    members = {"._data.csv": b"\x00\x05\x16\x07", "data.csv": CSV_BYTES}
-    archive = make_tar(tmp_path / "data.tar.bz2", members)
-    assert extract_archive(archive, tmp_path / "dest") == tmp_path / "dest" / "data.csv"
+@pytest.mark.parametrize("kind", ARCHIVE_KINDS)
+def test_extract_member_ignores_macos_sidecars(tmp_path: Path, kind: str) -> None:
+    members = {
+        "__MACOSX/._data.csv": b"\x00\x05",
+        "._data.csv": b"\x00\x05\x16\x07",
+        "data.csv": CSV_BYTES,
+    }
+    archive = build_archive(tmp_path, kind, members)
+    assert extract_member(archive, tmp_path / "d").read_bytes() == CSV_BYTES
 
 
+@pytest.mark.parametrize("kind", ARCHIVE_KINDS)
+def test_extract_member_with_only_a_sidecar_is_an_error(
+    tmp_path: Path, kind: str
+) -> None:
+    archive = build_archive(tmp_path, kind, {"._data.csv": b"\x00", "notes.txt": b""})
+    with pytest.raises(ArchiveError, match=r"found none.*members: \._data\.csv, notes"):
+        extract_member(archive, tmp_path / "d")
+
+
+@pytest.mark.parametrize("kind", ARCHIVE_KINDS)
+def test_extract_member_without_a_csv_lists_the_members(
+    tmp_path: Path, kind: str
+) -> None:
+    archive = build_archive(tmp_path, kind, {"a/readme.md": b"x", "b.txt": b"y"})
+    with pytest.raises(ArchiveError) as info:
+        extract_member(archive, tmp_path / "d")
+    assert "members: a/readme.md, b.txt" in str(info.value)
+    assert isinstance(info.value, InputError)
+    assert not (tmp_path / "d" / "data.csv").exists()
+
+
+def test_extract_member_lists_at_most_twenty_members(tmp_path: Path) -> None:
+    archive = make_zip(tmp_path / "d.zip", {f"f{i:02}.txt": b"" for i in range(25)})
+    with pytest.raises(ArchiveError) as info:
+        extract_member(archive, tmp_path / "d")
+    message = str(info.value)
+    assert "f19.txt, and 5 more" in message
+    assert "f20.txt" not in message
+
+
+@pytest.mark.parametrize("kind", ARCHIVE_KINDS)
+def test_extract_member_rejects_two_csvs_and_leaves_nothing(
+    tmp_path: Path, kind: str
+) -> None:
+    archive = build_archive(tmp_path, kind, {"a.csv": CSV_BYTES, "b.csv": CSV_BYTES})
+    dest = tmp_path / "d"
+    with pytest.raises(ArchiveError, match=r"found 2 matching '.*csv': a.csv, b.csv"):
+        extract_member(archive, dest)
+    assert not (dest / "data.csv").exists()
+
+
+@pytest.mark.parametrize("kind", ARCHIVE_KINDS)
 @pytest.mark.parametrize(
-    ("members", "message"),
+    ("name", "why"),
     [
-        ({"README": b"hi"}, "found 0: none"),
-        ({"._data.csv": b"\x00\x05\x16\x07"}, "found 0: none"),
-        ({"a.csv": CSV_BYTES, "b.csv": CSV_BYTES}, "found 2: a.csv, b.csv"),
+        ("../evil.csv", "'..'"),
+        ("ok/../../evil.csv", "'..'"),
+        ("/abs/evil.csv", "absolute"),
+        ("..\\evil.csv", "'..'"),
+        ("C:/evil.csv", "absolute"),
     ],
 )
-def test_extract_archive_needs_exactly_one_csv(
-    tmp_path: Path, members: dict[str, bytes], message: str
+def test_extract_member_rejects_unsafe_names(
+    tmp_path: Path, kind: str, name: str, why: str
 ) -> None:
-    archive = make_zip(tmp_path / "data.zip", members)
-    with pytest.raises(InputError, match=message):
-        extract_archive(archive, tmp_path / "dest")
+    archive = build_archive(tmp_path, kind, {name: CSV_BYTES})
+    dest = tmp_path / "a" / "dest"
+    with pytest.raises(ArchiveError, match=f"unsafe member.*{why}"):
+        extract_member(archive, dest)
+    assert not list((tmp_path / "a").rglob("*.csv"))
 
 
-def test_extract_archive_wraps_extraction_errors(tmp_path: Path) -> None:
-    archive = make_tar(tmp_path / "evil.tar.bz2", {"../evil.csv": CSV_BYTES})
-    with pytest.raises(
-        InputError, match=re.escape("can't extract evil.tar.bz2")
-    ) as info:
-        extract_archive(archive, tmp_path / "dest")
-    assert isinstance(info.value.__cause__, tarfile.OutsideDestinationError)
+@pytest.mark.parametrize("kind", [".tar.bz2", ".tar"])
+@pytest.mark.parametrize(
+    "target", ["../outside.csv", "/etc/passwd", "other.csv"], ids=["up", "abs", "same"]
+)
+def test_extract_member_rejects_a_symlink(
+    tmp_path: Path, kind: str, target: str
+) -> None:
+    archive = build_archive(tmp_path, kind, {}, {"evil.csv": target})
+    with pytest.raises(ArchiveError, match=r"unsafe member 'evil.csv'.*symlink"):
+        extract_member(archive, tmp_path / "d")
+    assert not (tmp_path / "d" / "data.csv").exists()
+
+
+def test_extract_member_rejects_a_hardlink(tmp_path: Path) -> None:
+    archive = tmp_path / "h.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("evil.csv")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    with pytest.raises(ArchiveError, match=r"unsafe member 'evil.csv'.*hardlink"):
+        extract_member(archive, tmp_path / "d")
+
+
+def test_extract_member_rejects_a_zip_symlink(tmp_path: Path) -> None:
+    archive = tmp_path / "s.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        info = zipfile.ZipInfo("evil.csv")
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(info, "/etc/passwd")
+    with pytest.raises(ArchiveError, match=r"unsafe member 'evil.csv'.*symlink"):
+        extract_member(archive, tmp_path / "d")
+
+
+def test_extract_member_takes_a_custom_pattern(tmp_path: Path) -> None:
+    archive = make_zip(tmp_path / "d.zip", {"a.csv": b"1", "b.txt": b"2"})
+    assert extract_member(archive, tmp_path / "d", "*.TXT").read_bytes() == b"2"
 
 
 @pytest.mark.parametrize("name", ["data.tar.bz2", "data.zip"])
-def test_extract_archive_rejects_corrupt_archives(tmp_path: Path, name: str) -> None:
+def test_extract_member_rejects_corrupt_archives(tmp_path: Path, name: str) -> None:
     archive = tmp_path / name
     archive.write_bytes(b"not an archive")
     with pytest.raises(InputError, match=re.escape(f"can't extract {name}")):
-        extract_archive(archive, tmp_path / "dest")
+        extract_member(archive, tmp_path / "dest")
 
 
-def test_extract_archive_rejects_a_csv(synthetic_csv: Path, tmp_path: Path) -> None:
+def test_extract_member_rejects_a_truncated_bz2_tar(tmp_path: Path) -> None:
+    archive = make_tar(tmp_path / "t.tar.bz2", {"data.csv": os.urandom(50_000)})
+    archive.write_bytes(archive.read_bytes()[:-200])
+    with pytest.raises(InputError, match=r"can't extract t.tar.bz2"):
+        extract_member(archive, tmp_path / "dest")
+
+
+def test_extract_member_rejects_a_csv(synthetic_csv: Path, tmp_path: Path) -> None:
     with pytest.raises(InputError, match="is a CSV, not an archive"):
-        extract_archive(synthetic_csv, tmp_path / "dest")
+        extract_member(synthetic_csv, tmp_path / "dest")
 
 
 # --- input resolution -------------------------------------------------------------
@@ -613,7 +671,7 @@ def test_input_csv_extracts_archives_to_a_temporary_directory(
     else:
         make_tar(archive, members)
     with input_csv(archive) as path:
-        assert path.name == "Data.csv"
+        assert path.name == "data.csv"
         assert not path.is_relative_to(tmp_path)
         assert_frame_equal(read_typed_frame(path), read_typed_frame(synthetic_csv))
     assert not path.exists()

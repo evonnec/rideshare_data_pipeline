@@ -5,6 +5,7 @@ file that reproduces the known data issues is ``full_synthetic_csv`` (and its ty
 frame, ``full_synthetic_frame``); see fixtures/make_synthetic.py.
 """
 
+import tempfile
 from pathlib import Path
 
 import polars as pl
@@ -38,3 +39,21 @@ def full_synthetic_frame() -> pl.DataFrame:
 def full_synthetic_derived(full_synthetic_frame: pl.DataFrame) -> pl.DataFrame:
     """The typed frame plus the derived and flag columns, as the checks see it."""
     return supersede_flags(full_synthetic_frame.with_columns(derived_columns()))
+
+
+@pytest.fixture
+def empty_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Run the test from an empty working directory (to show nothing lands there)."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    return cwd
+
+
+@pytest.fixture
+def private_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point tempfile at an empty directory, to check what extraction leaves."""
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp))
+    return tmp

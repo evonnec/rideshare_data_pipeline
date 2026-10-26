@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -12,6 +13,7 @@ from pathlib import Path
 # None of these import polars at import time (they use PEP 810 lazy imports), so
 # `rideshare-qc --help` and argument errors return without loading it.
 from rideshare_data_pipeline import __version__
+from rideshare_data_pipeline.cache import CacheStatus, load_typed
 from rideshare_data_pipeline.checks import default_rules, run_checks
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
 from rideshare_data_pipeline.checks.structural import (
@@ -30,9 +32,7 @@ from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.io import (
     FileFacts,
     InputError,
-    input_csv,
     input_stem,
-    read_typed,
     write_parquet,
 )
 from rideshare_data_pipeline.parse import with_derived
@@ -50,6 +50,8 @@ EXIT_OK = 0
 EXIT_GATED = 1
 EXIT_INPUT_ERROR = 2
 
+CACHE_ENV = "RIDESHARE_QC_CACHE"
+
 # The parser keeps this text's line breaks (RawDescriptionHelpFormatter).
 _DESCRIPTION = """\
 Quality-control checks for the rideshare e-receipt CSV.
@@ -62,6 +64,11 @@ into DIR: report.json, report.md, samples/<check>.parquet for each failed check,
 and <input stem>.parquet with every column and row (unless --drop-columns names
 columns to leave out). Reports hold hashed user ids and masked subjects only, but
 keep DIR outside the repository anyway.
+
+With --cache-dir (or the environment variable RIDESHARE_QC_CACHE) the validated,
+typed data is also kept as Parquet there, keyed by the input's SHA-256, and a later
+run on the same file skips extraction and parsing. That cache is a typed copy of the
+real data: keep it outside the repository too. Without either, nothing is cached.
 """
 
 _RUN_EPILOG = f"""\
@@ -93,6 +100,7 @@ class Summary:
     written: Written
     config: QCConfig
     exit_code: int
+    cache: CacheStatus = "off"
 
 
 def _column_list(text: str) -> list[str]:
@@ -162,6 +170,23 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="A,B",
         help="comma-separated columns to leave out of the Parquet (default: none)",
     )
+    run_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "keep a typed Parquet copy of the input in DIR (also read from "
+            f"${CACHE_ENV}); later runs on the same file skip extraction and "
+            "parsing. Opt-in: "
+            "without it nothing is cached. Holds real data, so keep it outside "
+            "the repository"
+        ),
+    )
+    run_parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="rebuild the cache entry for this input even if a valid one exists",
+    )
     return parser
 
 
@@ -179,16 +204,20 @@ def run(
     out_dir: Path,
     config: QCConfig | None = None,
     drop_columns: Sequence[str] = (),
+    cache_dir: Path | None = None,
+    refresh_cache: bool = False,
 ) -> Summary:
     """Read the input, run the checks, write the Parquet and the report.
 
     Raises InputError if the input can't be read, and OSError if the output
-    can't be written. Nothing is written until the input has been read.
+    can't be written. Nothing is written until the input has been read. With a
+    `cache_dir` the typed frame comes from, and is saved to, the Parquet cache (see
+    cache.py); a cache that can't be used is a warning, never an error.
     """
     config = config or QCConfig()
     started, clock = _utc_now(), time.perf_counter()
-    with input_csv(input_path) as csv_path:
-        df, facts = read_typed(csv_path)
+    loaded = load_typed(input_path, cache_dir, refresh=refresh_cache)
+    df, facts = loaded.df, loaded.facts
     # read_typed raises HeaderError, EncodingError or CastError on a bad header,
     # bad bytes or any cast failure, so reaching here means there were none;
     # recording that keeps the S1, S3 and S2 lines in the report.
@@ -234,6 +263,7 @@ def run(
         finished=_utc_now(),
         elapsed_seconds=time.perf_counter() - clock,
         config=config,
+        cache=loaded.cache,
     )
     written = write_report(out_dir, results, info, code)
     return Summary(
@@ -251,6 +281,7 @@ def run(
         written=written,
         config=config,
         exit_code=code,
+        cache=loaded.cache,
     )
 
 
@@ -285,6 +316,8 @@ def format_summary(summary: Summary) -> str:
         "duplicate rows": "disabled" if duplicates is None else f"{duplicates:,}",
         "wrote": f"{summary.output} ({summary.output_columns} columns)",
     }
+    if summary.cache != "off":
+        lines["cache"] = summary.cache
     width = max(map(len, lines)) + 2
     return "\n".join(f"{f'{label}:':<{width}}{value}" for label, value in lines.items())
 
@@ -325,12 +358,25 @@ def format_outcome(summary: Summary) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line and return its exit status."""
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    cache_dir = args.cache_dir or (
+        Path(os.environ[CACHE_ENV]) if os.environ.get(CACHE_ENV) else None
+    )
+    if args.refresh_cache and cache_dir is None:
+        parser.error(f"--refresh-cache needs --cache-dir or ${CACHE_ENV}")
     try:
         config = QCConfig() if args.config is None else load_config(args.config)
         if args.fail_on is not None:
             config = dataclasses.replace(config, fail_on=Severity(args.fail_on))
-        summary = run(args.input, args.out, config, args.drop_columns)
+        summary = run(
+            args.input,
+            args.out,
+            config,
+            args.drop_columns,
+            cache_dir,
+            args.refresh_cache,
+        )
     except (InputError, OSError) as err:
         print(f"rideshare-qc: error: {err}", file=sys.stderr)
         return EXIT_INPUT_ERROR
