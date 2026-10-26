@@ -8,7 +8,7 @@ import jsonschema
 import polars as pl
 import pytest
 from fixtures.make_synthetic import MANIFEST, USD_AMOUNT
-from synthetic import write_csv_text
+from synthetic import make_tar, write_csv_text
 
 from rideshare_data_pipeline import __version__
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
@@ -642,3 +642,16 @@ def test_duplicate_receipts_in_json_and_markdown(
     section = lines[start : lines.index("## Column profile")]
     assert any("29.36" in ln for ln in section)
     assert "| ride+tip_update | 1 | 12.38 |" in section
+
+
+def test_archive_report_with_a_member_validates_against_the_schema(
+    synthetic_csv: Path, tmp_path: Path
+) -> None:
+    archive = make_tar(tmp_path / "a.tar.gz", {"d/x.csv": synthetic_csv.read_bytes()})
+    out = tmp_path / "out"
+    run_cli(archive, out)
+    report = load(out)
+    run = report["run"]
+    assert isinstance(run, dict)
+    assert run["member"]["name"] == "d/x.csv"
+    jsonschema.validate(report, json.loads(schema_text()))

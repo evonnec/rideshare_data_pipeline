@@ -5,8 +5,8 @@ from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import IO, Literal
 
 # PEP 810 lazy imports: each module below is bound now but only imported on first
 # use, so importing this module (e.g. from the CLI before it has parsed its
@@ -14,10 +14,15 @@ from typing import Literal
 # pl.DataFrame / pl.LazyFrame hints below never force the import either.
 lazy import codecs
 lazy import csv
+lazy import fnmatch
 lazy import hashlib
+lazy import lzma
+lazy import shutil
+lazy import stat
 lazy import tarfile
 lazy import tempfile
-lazy from zipfile import BadZipFile, ZipFile
+lazy import zlib
+lazy from zipfile import BadZipFile, ZipFile, ZipInfo
 
 lazy import polars as pl
 
@@ -77,34 +82,144 @@ def input_stem(path: StrPath) -> str:
     return _split_input_name(path)[0]
 
 
-def extract_tar(archive: StrPath, dest: StrPath) -> None:
-    """Extract a tar archive (uncompressed, bz2, gzip or xz) into dest.
+class ArchiveError(InputError):
+    """The archive can't give up exactly one safe CSV.
 
-    The "data" filter rejects members that would land outside dest (``../x``),
-    links that point outside it, and device files; it strips leading slashes and
-    unsafe permission bits. A rejected member raises tarfile.FilterError.
+    Raised when it holds no CSV or several (the message lists the member names, at
+    most 20), or when the one CSV is a link or has an unsafe name (absolute, or
+    with a ``..`` component).
     """
+
+
+# The one CSV is always written under this name, whatever the member is called, so
+# a member's own name never reaches the file system.
+EXTRACTED_NAME = "data.csv"
+_MAX_LISTED = 20
+
+
+def _listing(names: Sequence[str]) -> str:
+    """Join at most 20 names; "and N more" covers the rest, "none" an empty list."""
+    shown = ", ".join(names[:_MAX_LISTED]) or "none"
+    more = len(names) - _MAX_LISTED
+    return f"{shown}, and {more} more" if more > 0 else shown
+
+
+def _is_sidecar(name: str) -> bool:
+    """A macOS AppleDouble metadata file: ``._x`` anywhere in the path."""
+    return PurePosixPath(name.replace("\\", "/")).name.startswith("._")
+
+
+def _unsafe_name(name: str) -> str | None:
+    """Say why a member name is unsafe to trust (absolute, ``..``), else None."""
+    norm = name.replace("\\", "/")
+    if norm.startswith("/") or PureWindowsPath(norm).drive:
+        return "an absolute path"
+    if ".." in norm.split("/"):
+        return "a path with a '..' component"
+    return None
+
+
+def _wanted(name: str, pattern: str) -> bool:
+    """True for a member the pattern selects: a case-insensitive glob on the path."""
+    return fnmatch.fnmatchcase(name.lower(), pattern.lower()) and not _is_sidecar(name)
+
+
+def _copy_to(source: IO[bytes], target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with source, target.open("wb") as out:
+        shutil.copyfileobj(source, out, _CHUNK_BYTES)
+
+
+def _settle(
+    archive: Path,
+    pattern: str,
+    members: Sequence[str],
+    chosen: Sequence[str],
+    problem: str | None,
+    target: Path,
+) -> tuple[Path, str]:
+    """Turn what the listing found into (extracted path, member), or an ArchiveError."""
+    if len(chosen) != 1:
+        target.unlink(missing_ok=True)
+        if chosen:
+            what = f"found {len(chosen)} matching {pattern!r}: {_listing(chosen)}"
+        else:
+            what = f"found none matching {pattern!r}; members: {_listing(members)}"
+        msg = f"expected exactly one {pattern!r} member in {archive.name}, {what}"
+        raise ArchiveError(msg)
+    if problem is not None:
+        msg = f"unsafe member {chosen[0]!r} in {archive.name}: {problem}"
+        raise ArchiveError(msg)
+    return target, chosen[0]
+
+
+def _tar_problem(info: tarfile.TarInfo) -> str | None:
+    if info.issym():
+        return "a symlink"
+    if info.islnk():
+        return "a hardlink"
+    if not info.isreg():
+        return "not a regular file"
+    unsafe = _unsafe_name(info.name)
+    return None if unsafe is None else f"{unsafe}"
+
+
+def _extract_tar_member(archive: Path, dest: Path, pattern: str) -> tuple[Path, str]:
+    # One sequential pass: listing a compressed tar means decompressing it, and
+    # seeking back to a member afterwards would decompress it all over again. So the
+    # first match is written as it goes by, and a second one discards it.
+    target = dest / EXTRACTED_NAME
+    members: list[str] = []
+    chosen: list[str] = []
+    problem: str | None = None
     with tarfile.open(archive, "r:*") as tar:
-        tar.extractall(dest, filter="data")
+        for info in tar:
+            if info.isdir():
+                continue
+            members.append(info.name)
+            if not _wanted(info.name, pattern):
+                continue
+            chosen.append(info.name)
+            if len(chosen) == 1:
+                problem = _tar_problem(info)
+                if problem is None:
+                    source = tar.extractfile(info)
+                    assert source is not None  # a regular file
+                    _copy_to(source, target)
+    return _settle(archive, pattern, members, chosen, problem, target)
 
 
-def extract_zip(archive: StrPath, dest: StrPath) -> None:
-    """Extract a zip archive into dest.
+def _zip_problem(info: ZipInfo) -> str | None:
+    if info.flag_bits & 0x1:
+        return "encrypted"
+    if stat.S_ISLNK(info.external_attr >> 16):
+        return "a symlink"
+    return _unsafe_name(info.filename)
 
-    zipfile sanitises member names itself: leading slashes and ``..`` components
-    are removed, so every member lands inside dest.
-    """
+
+def _extract_zip_member(archive: Path, dest: Path, pattern: str) -> tuple[Path, str]:
+    target = dest / EXTRACTED_NAME
     with ZipFile(archive) as zip_file:
-        zip_file.extractall(dest)
+        infos = [i for i in zip_file.infolist() if not i.is_dir()]
+        names = [i.filename for i in infos]
+        picked = [i for i in infos if _wanted(i.filename, pattern)]
+        problem = _zip_problem(picked[0]) if picked else None
+        if problem == "encrypted":
+            msg = (
+                f"can't extract {archive.name}: encrypted zip members are not supported"
+            )
+            raise ArchiveError(msg)
+        if len(picked) == 1 and problem is None:
+            _copy_to(zip_file.open(picked[0]), target)
+    return _settle(
+        archive, pattern, names, [i.filename for i in picked], problem, target
+    )
 
 
-def extract_archive(archive: StrPath, dest: StrPath) -> Path:
-    """Extract a tar or zip archive into dest and return the one CSV it holds.
-
-    macOS metadata files (``._name.csv`` AppleDouble sidecars, which archives made
-    on a Mac often carry) don't count as CSVs. Raises InputError if the archive
-    can't be extracted, or if it holds no CSV or more than one.
-    """
+def extract_member_named(
+    archive: StrPath, dest: StrPath, member: str = "*.csv"
+) -> tuple[Path, str]:
+    """Like extract_member, but also return the member's name inside the archive."""
     archive, dest = Path(archive), Path(dest)
     _, kind = _split_input_name(archive)
     if kind == "csv":
@@ -112,44 +227,83 @@ def extract_archive(archive: StrPath, dest: StrPath) -> Path:
         raise InputError(msg)
     try:
         if kind == "tar":
-            extract_tar(archive, dest)
-        else:
-            extract_zip(archive, dest)
-    except (tarfile.TarError, BadZipFile) as err:
-        msg = f"can't extract {archive.name}: {err}"
-        raise InputError(msg) from err
+            return _extract_tar_member(archive, dest, member)
+        return _extract_zip_member(archive, dest, member)
+    except RuntimeError as err:
+        # zipfile reports an encrypted member this way.
+        what = (
+            "encrypted zip members are not supported"
+            if "encrypted" in str(err)
+            else f"archive is truncated or corrupt: {err}"
+        )
+        msg = f"can't extract {archive.name}: {what}"
+        raise ArchiveError(msg) from err
+    except (
+        tarfile.TarError,
+        BadZipFile,
+        EOFError,
+        OSError,
+        zlib.error,
+        lzma.LZMAError,
+        NotImplementedError,
+    ) as err:
+        msg = f"can't extract {archive.name}: archive is truncated or corrupt: {err}"
+        raise ArchiveError(msg) from err
 
-    csvs = sorted(
-        p
-        for p in dest.rglob("*")
-        if p.is_file() and p.suffix.lower() == ".csv" and not p.name.startswith("._")
-    )
-    if len(csvs) != 1:
-        found = ", ".join(str(p.relative_to(dest)) for p in csvs) or "none"
-        msg = f"expected exactly one CSV in {archive.name}, found {len(csvs)}: {found}"
-        raise InputError(msg)
-    return csvs[0]
 
+def extract_member(archive: StrPath, dest: StrPath, member: str = "*.csv") -> Path:
+    """Extract exactly one member of a tar or zip archive into dest; return its path.
 
-@contextmanager
-def input_csv(path: StrPath) -> Iterator[Path]:
-    """Yield the CSV to read for `path`, a CSV file or an archive holding one.
+    `member` is a case-insensitive glob on the member's path (default: any CSV).
+    Directories and macOS ``._*`` sidecars never count. Zero matches or several
+    raise ArchiveError naming the members (at most 20); so does a match that is a
+    symlink, a hardlink or another non-regular member, or whose name is absolute
+    or has a ``..`` component. Nothing else in the archive is extracted.
 
-    A CSV is yielded as is. An archive is extracted into a new temporary
-    directory, which is removed, with everything in it, when the block exits;
-    nothing is written next to the input or to the working directory. Raises
-    InputError if `path` isn't a file or isn't a supported input.
+    The bytes are streamed to ``dest/data.csv`` (see EXTRACTED_NAME), a fixed name
+    chosen here, rather than extracted under the member's own path: so there is
+    no path to escape by, and tarfile's extraction filters aren't needed. Every
+    failure to open, list or read the archive (truncated, corrupt, an encrypted
+    zip member) is an ArchiveError, so a damaged archive is an input error
+    (exit 2), never a crash.
     """
+    return extract_member_named(archive, dest, member)[0]
+
+
+def validate_input(path: StrPath) -> InputKind:
+    """Return the input's kind; raise InputError unless it is a supported file."""
     path = Path(path)
     _, kind = _split_input_name(path)
     if not path.is_file():
         msg = f"input not found: {path}"
         raise InputError(msg)
-    if kind == "csv":
-        yield path
+    return kind
+
+
+@contextmanager
+def open_input(path: StrPath) -> Iterator[tuple[Path, str | None]]:
+    """Yield (the CSV to read, its member name) for `path`, a CSV or an archive.
+
+    A CSV is yielded as is, with no member name. An archive's one CSV (see
+    extract_member) is extracted into a new temporary directory, which is removed,
+    with everything in it, when the block exits; the member name is its path
+    inside the archive. Nothing is written next to the input or to the working
+    directory. Raises InputError if `path` isn't a file or isn't a supported input.
+    """
+    path = Path(path)
+    if validate_input(path) == "csv":
+        yield path, None
         return
     with tempfile.TemporaryDirectory(prefix="rideshare-qc-") as tmp:
-        yield extract_archive(path, tmp)
+        csv_path, name = extract_member_named(path, tmp)
+        yield csv_path, name
+
+
+@contextmanager
+def input_csv(path: StrPath) -> Iterator[Path]:
+    """Yield the CSV to read for `path`; see open_input."""
+    with open_input(path) as (csv_path, _):
+        yield csv_path
 
 
 class HeaderError(InputError):
@@ -222,6 +376,15 @@ _CHUNK_BYTES = 4 * 1024 * 1024
 _BOM = b"\xef\xbb\xbf"
 
 
+def file_sha256(path: StrPath) -> str:
+    """Hex SHA-256 of the file's bytes, read in chunks."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        while chunk := f.read(_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _line_ending(*, crlf: int, bare_lf: int) -> LineEnding:
     """Name the style from the counts of "\\r\\n" and lone "\\n" line breaks."""
     if crlf and bare_lf:
@@ -229,7 +392,9 @@ def _line_ending(*, crlf: int, bare_lf: int) -> LineEnding:
     return "crlf" if crlf else "lf"
 
 
-def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
+def _scan_bytes(
+    path: Path, name: str | None = None
+) -> tuple[int, str, bool, LineEnding]:
     """Validate the file as UTF-8 in one streaming pass and describe its bytes.
 
     Returns the size, the SHA-256 (hex), whether it starts with a BOM, and the
@@ -261,7 +426,8 @@ def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
                     if err.reason.startswith("unexpected end")
                     else "invalid byte"
                 )
-                msg = f"{path.name} isn't valid UTF-8: {what} at byte offset {offset:,}"
+                shown = name or path.name
+                msg = f"{shown} isn't valid UTF-8: {what} at byte offset {offset:,}"
                 raise EncodingError(msg, offset=offset) from err
             if final:
                 break
@@ -276,7 +442,7 @@ def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
     return position, digest.hexdigest(), has_bom, ending
 
 
-def _read_header(path: Path) -> tuple[str, ...]:
+def _read_header(path: Path, name: str | None = None) -> tuple[str, ...]:
     """Parse the first record as CSV (so a quoted comma stays in its name).
 
     Raises InputError if the file has no content. utf-8-sig drops any BOM.
@@ -284,7 +450,7 @@ def _read_header(path: Path) -> tuple[str, ...]:
     with path.open(encoding="utf-8-sig", newline="") as f:
         first = next(csv.reader(f), None)
     if first is None:
-        msg = f"{path.name} is empty"
+        msg = f"{name or path.name} is empty"
         raise InputError(msg)
     return tuple(first)
 
@@ -333,7 +499,7 @@ def check_header(header: Sequence[str]) -> None:
         )
 
 
-def inspect_csv(path: StrPath) -> FileFacts:
+def inspect_csv(path: StrPath, name: str | None = None) -> FileFacts:
     """Validate the file's encoding and header; return what the bytes looked like.
 
     Reads the whole file once for UTF-8 validity (about a second per GB), then the
@@ -341,8 +507,8 @@ def inspect_csv(path: StrPath) -> FileFacts:
     for an empty file.
     """
     path = Path(path)
-    size, sha256, has_bom, line_ending = _scan_bytes(path)
-    header = _read_header(path)
+    size, sha256, has_bom, line_ending = _scan_bytes(path, name)
+    header = _read_header(path, name)
     check_header(header)
     return FileFacts(size, sha256, has_bom, line_ending, header)
 
@@ -392,7 +558,9 @@ def _first_line(err: Exception) -> str:
     return str(err).partition("\n")[0]
 
 
-def read_typed(path: StrPath) -> tuple[pl.DataFrame, FileFacts]:
+def read_typed(
+    path: StrPath, name: str | None = None
+) -> tuple[pl.DataFrame, FileFacts]:
     """Validate the CSV, then read it into a DataFrame with the schema's dtypes.
 
     The raw frame is scanned twice, both times streaming: once to count cast
@@ -400,8 +568,8 @@ def read_typed(path: StrPath) -> tuple[pl.DataFrame, FileFacts]:
     and collect. Raises InputError (or a subclass) for anything wrong with the
     file; returns the frame and the byte-level facts.
     """
-    name = Path(path).name
-    facts = inspect_csv(path)
+    name = name or Path(path).name
+    facts = inspect_csv(path, name)
     raw = read_raw(path, inspected=facts)
     try:
         failures = {col: n for col, n in cast_failures(raw).items() if n}

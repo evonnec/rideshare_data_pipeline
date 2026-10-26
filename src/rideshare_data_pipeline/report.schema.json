@@ -19,9 +19,22 @@
       "properties": {
         "tool_version": { "type": "string" },
         "input_name": { "type": "string", "description": "Base name of the input; never a full path." },
-        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the CSV bytes." },
-        "input_size_bytes": { "type": "integer", "minimum": 0 },
-        "bom": { "type": "boolean", "description": "The CSV starts with a UTF-8 byte order mark." },
+        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the file that was passed: the CSV, or the archive." },
+        "input_size_bytes": { "type": "integer", "minimum": 0, "description": "Size of the file that was passed." },
+        "bom": { "type": "boolean", "description": "The CSV that was read (the archive's member, for an archive) starts with a UTF-8 byte order mark." },
+        "member": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["name", "sha256", "size_bytes", "has_bom", "line_ending"],
+          "description": "The CSV extracted from an archive input; null for a CSV input.",
+          "properties": {
+            "name": { "type": "string", "description": "Base name of the member inside the archive." },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "size_bytes": { "type": "integer", "minimum": 0 },
+            "has_bom": { "type": "boolean" },
+            "line_ending": { "enum": ["crlf", "lf", "mixed"] }
+          }
+        },
         "line_ending": { "enum": ["crlf", "lf", "mixed"] },
         "rows": { "type": "integer", "minimum": 0 },
         "panelists": { "type": "integer", "minimum": 0, "description": "Distinct user_id values." },
@@ -38,6 +51,7 @@
         "started": { "type": "string", "description": "UTC, ISO 8601." },
         "finished": { "type": "string", "description": "UTC, ISO 8601." },
         "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "cache": { "enum": ["hit", "miss", "off"], "description": "Whether the typed frame came from the Parquet cache (hit), was read and then cached (miss), or no cache was configured (off)." },
         "config": {
           "type": "object",
           "additionalProperties": false,
