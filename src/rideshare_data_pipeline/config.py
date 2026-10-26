@@ -42,6 +42,10 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "duplicate_rows",
     "receipt_kinds",
     "unclassified_subject_templates",
+    "duplicate_receipts",
+    "dedupe_key_unique",
+    "cross_panelist_duplicates",
+    "near_duplicate_rides",
 )
 
 # `fail_on` can only be a gating severity: info checks never gate.
@@ -184,7 +188,8 @@ def configure_results(
     """Apply the overrides to results that were computed without them.
 
     Used for the dataset checks, which don't take thresholds as input: a disabled
-    check is dropped, an overridden severity is set, and an overridden
+    check is dropped, its sample is cut to ``sample_limit`` rows, an overridden
+    severity is set, and an overridden
     max_failed_rate replaces the threshold and re-judges ``passed`` against the
     check's metric (a check with no metric has nothing to judge and passes).
     """
@@ -193,6 +198,11 @@ def configure_results(
         o = config.override(result.name)
         if not o.enabled:
             continue
+        sample = result.sample
+        if sample is not None and sample.height > config.sample_limit:
+            result = dataclasses.replace(
+                result, sample=sample.head(config.sample_limit)
+            )
         if o.severity is not None:
             result = dataclasses.replace(result, severity=o.severity)
         if o.max_failed_rate is not None:

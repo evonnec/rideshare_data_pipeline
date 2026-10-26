@@ -66,7 +66,7 @@ A row rule passes while its failure rate is at most its threshold (`max_failed_r
 
 The file mixes receipt types that are not rider spend, all tagged with the category `Travel`. `parse.py` derives, from the subject template, the description line, `product_reseller`, `UF-` order numbers and `order_pickup`, one of these kinds per row: `ride`, `tip_update`, `fare_correction`, `cancel_noshow`, `payment_failed`, `driver_earnings`, `pass_or_credit`, `micromobility`, `food_order`, `freight`, `rental`. The rules form an ordered chain, most specific first (see `_rules` in `parse.py`); a row no rule matches defaults to `ride` and is counted by the `unclassified_subject_templates` check. Mail-gateway prefixes (`(EXTERNAL SENDER)`, `{Disarmed}`) and leading bracket tags are stripped before matching, and a leading `[Business]` or `[Personal]` tag becomes `subject_profile`.
 
-**Rider spend.** `is_rider_spend` is true for `ride`, `tip_update`, `fare_correction` and `cancel_noshow`. Other kinds stay in the data, flagged, and are left out of spend. A cancellation fee counts as spend under its own kind. A tip update or a fare correction supersedes the receipt of the ride it amends; removing that original is the dedupe (#13). Currency gating (#15) will narrow this to USD spend.
+**Rider spend.** `is_rider_spend` is true for `ride`, `tip_update`, `fare_correction` and `cancel_noshow`. Other kinds stay in the data, flagged, and are left out of spend. A cancellation fee counts as spend under its own kind. A tip update or a fare correction supersedes the receipt of the ride it amends; the dedupe flags that original (see Duplicates and dedupe). Currency gating (#15) will narrow this to USD spend.
 
 The derived columns (`receipt_kind`, `subject_profile`, `subject_unclassified`, `is_rider_spend`) are computed once per run for the checks. They are not in the output Parquet yet; the curated dataset with flags is #22.
 
@@ -81,6 +81,22 @@ A column is **all-null** when every value is null. It is **constant** when its n
 | 2 | Input or parse error, a bad config file (unknown key or check name, bad value), invalid arguments, or the output can't be written. The reason is printed to stderr. **Nothing is written** (no report either) when the input or config can't be read. |
 
 Input errors include a missing or unsupported file, an archive that can't be extracted or doesn't hold exactly one CSV, an empty file, bytes that aren't valid UTF-8 (the message gives the byte offset), a header with missing, extra, duplicated or reordered columns (the message names them), and values that don't convert to their column's type (the message counts the failures per column). Values are never nulled silently. A UTF-8 BOM is accepted and stripped, and CRLF and LF files read identically; the summary reports both. Known gap: a row with too few fields is padded with nulls, not flagged. `python -m rideshare_data_pipeline run ...` works the same way as `rideshare-qc run ...`. The old flat invocation (`rideshare-qc --input ...`) is gone.
+
+## Duplicates and dedupe
+
+The legacy whole-row duplicate check could never fire: `checksum` is unique per row and the ingestion metadata differs between versions of a receipt. The vendor upserts updated receipts and the same receipt can reach two panelists, so duplicates are found on the order key `(merchant_name, order_number)`, over rows where both are non-null (a null is not a key: recurring pass charges have no order number and are legitimate).
+
+**Dedupe policy** (`dedupe.py`). `supersede_flags` adds a boolean `is_superseded`; **rows are never dropped**, consumers filter on the flag (`deduplicated` is that view, used for spend metrics from #15 on). Within a key group one row wins and the rest are superseded. The winner is the first of: a `tip_update` or `fare_correction` (kind priority beats time, so a tip update supersedes its ride even when the ride's email is later); the latest `email_time`; the latest `update_time`; the greatest `checksum`. Rows without a key are never superseded, and dedupe is idempotent. The flag is computed once per run for the checks and is not in the output Parquet (the curated dataset with flags is #22).
+
+| Check | Severity | Finds |
+|---|---|---|
+| `checksum_unique` (U1) | error | a repeated `checksum` |
+| `duplicate_receipts` (U2) | warn | rows in repeated keys; details: groups, excess (superseded) rows, excess spend, breakdown by kind pair; shown in the report's "Duplicate receipts" section |
+| `dedupe_key_unique` (U2b) | error | a repeated key among rows the dedupe kept; holds by construction and guards against a dedupe bug |
+| `cross_panelist_duplicates` (U3) | warn | one key under more than one `user_id` |
+| `near_duplicate_rides` (U4) | warn | rides identical on user, merchant, order date, total and description but with different or null order numbers (excess rows); flagged only, never deduped |
+
+U2 is a warning because a repeated key is expected vendor behaviour (re-sent receipts, a receipt in two mailboxes) that the dedupe resolves; an error would make every real run exit 1. Excess spend sums all currencies for now; #15 narrows it to USD.
 
 ## Configuration
 
@@ -126,6 +142,7 @@ src/rideshare_data_pipeline/
   __main__.py         python -m rideshare_data_pipeline
   cli.py              the rideshare-qc command (argparse, `run` subcommand): summary, check lines, reports, Parquet output, exit codes
   config.py           QCConfig and CheckOverride, TOML loading (tomllib), applying overrides to rules and results
+  dedupe.py           the dedupe policy: supersede_flags, deduplicated
   parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag
   report.py           report.json and report.md rendering, samples/<check>.parquet, exit-code policy
   report.schema.json  JSON Schema for report.json (package data)
@@ -139,7 +156,7 @@ src/rideshare_data_pipeline/
                       the failing rules are collected in one batch
     model.py          Severity, CheckResult, RowRule, DatasetCheck
     arithmetic.py     row rules: non_negative_total (A1)
-    uniqueness.py     row rules: checksum_unique (U1)
+    uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
     structural.py     all-null and constant columns (one lazy select), duplicate rows,
                       and their DatasetCheck wrappers

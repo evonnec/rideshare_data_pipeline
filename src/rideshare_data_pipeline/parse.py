@@ -33,6 +33,8 @@ shows up instead of silently counting as a ride.
 
 lazy import polars as pl
 
+from rideshare_data_pipeline.dedupe import FLAG_NAMES
+
 type Kind = str
 """One of KINDS."""
 
@@ -251,11 +253,11 @@ DERIVED_NAMES: tuple[str, ...] = (
 
 
 def input_columns(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """The frame without the derived columns (a no-op if it has none).
+    """The frame without the derived and flag columns (a no-op if it has none).
 
     Structural checks describe the delivered file, so they look at its columns only.
     """
-    return lf.drop(DERIVED_NAMES, strict=False)
+    return lf.drop((*DERIVED_NAMES, *FLAG_NAMES), strict=False)
 
 
 def derived_columns() -> list[pl.Expr]:

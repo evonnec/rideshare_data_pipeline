@@ -25,8 +25,15 @@ from rideshare_data_pipeline.report import (
     summarize,
 )
 
-IMPLEMENTED = ("S2", "A1", "U1", "S4", "S5", "U0", "V2")
-LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n"
+IMPLEMENTED = ("S2", "A1", "U1", "S4", "S5", "U0", "V2", "U2", "U2b", "U3", "U4")
+DUPLICATE_CHECKS = (
+    "duplicate_receipts",
+    "cross_panelist_duplicates",
+    "near_duplicate_rides",
+)
+LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n" + "".join(
+    f"[checks.{name}]\nmax_failed_rate = 0.05\n" for name in DUPLICATE_CHECKS
+)
 
 
 def run_cli(csv: Path, out: Path, *extra: str, config: str | None = None) -> int:
@@ -100,6 +107,9 @@ def test_run_writes_reports_and_samples(
     assert (out / "synthetic.parquet").is_file()
     assert sorted(p.name for p in (out / "samples").iterdir()) == [
         "category_mismatch.parquet",
+        "cross_panelist_duplicates.parquet",
+        "duplicate_receipts.parquet",
+        "near_duplicate_rides.parquet",
         "non_negative_total.parquet",
     ]
     sample = pl.read_parquet(out / "samples" / "non_negative_total.parquet")
@@ -145,10 +155,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 1,
+        "warnings_failed": 4,  # V2, U2, U3, U4
         "info": 4,
-        "passed": 7,
-        "total": 9,
+        "passed": 8,
+        "total": 13,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -186,6 +196,7 @@ def test_report_markdown_layout(full_synthetic_csv: Path, tmp_path: Path) -> Non
     for heading in (
         "## Summary",
         "## Composition by receipt kind",
+        "## Duplicate receipts",
         "## Column profile",
         "## Samples",
         "### non_negative_total",
@@ -229,7 +240,7 @@ def test_composition_in_json_and_markdown(
 
     lines = (out / "report.md").read_text(encoding="utf-8").splitlines()
     start = lines.index("## Composition by receipt kind")
-    section = lines[start : lines.index("## Column profile")]
+    section = lines[start : lines.index("## Duplicate receipts")]
     assert "| kind | rider spend | Lyft | Uber | total |" in section
     assert "| driver_earnings | no | 1 | 0 | 1 |" in section
     assert "| food_order | no | 0 | 2 | 2 |" in section
@@ -300,7 +311,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 2  # type: ignore[index]  # A1 and V2
+    assert report["summary"]["warnings_failed"] == 5  # type: ignore[index]  # A1, V2, U2, U3, U4
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
@@ -330,6 +341,7 @@ def test_info_checks_never_gate(full_synthetic_csv: Path, tmp_path: Path) -> Non
     config = (
         '[checks.non_negative_total]\nseverity = "info"\n'
         '[checks.category_mismatch]\nseverity = "info"\n'
+        + "".join(f'[checks.{n}]\nseverity = "info"\n' for n in DUPLICATE_CHECKS)
     )
     assert (
         run_cli(full_synthetic_csv, tmp_path / "a", "--fail-on", "warn", config=config)
@@ -343,6 +355,7 @@ def test_disabled_check_is_removed(full_synthetic_csv: Path, tmp_path: Path) -> 
         "[checks.non_negative_total]\nenabled = false\n"
         "[checks.category_mismatch]\nenabled = false\n"
         "[checks.duplicate_rows]\nenabled = false\n"
+        + "".join(f"[checks.{n}]\nenabled = false\n" for n in DUPLICATE_CHECKS)
     )
     assert run_cli(full_synthetic_csv, out, config=config) == 0
     names = set(checks_by_name(load(out)))
@@ -512,3 +525,26 @@ def test_sample_name_only_for_failed_results_with_rows() -> None:
     assert sample_name(make_result(passed=True)) is None
     assert sample_name(make_result(sample=None)) is None
     assert sample_name(make_result(sample=pl.DataFrame({"k": []}))) is None
+
+
+def test_duplicate_receipts_in_json_and_markdown(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    u2 = checks_by_name(load(out))["duplicate_receipts"]
+    details = u2["details"]
+    assert isinstance(details, dict)
+    assert details["groups"] == MANIFEST["U2.groups"]
+    assert details["excess_rows"] == MANIFEST["U2.superseded"]
+    assert details["excess_spend"] == pytest.approx(29.36)
+    assert [p["pair"] for p in details["kind_pairs"]] == [
+        "ride+ride",
+        "ride+tip_update",
+    ]
+
+    lines = (out / "report.md").read_text(encoding="utf-8").splitlines()
+    start = lines.index("## Duplicate receipts")
+    section = lines[start : lines.index("## Column profile")]
+    assert any("29.36" in ln for ln in section)
+    assert "| ride+tip_update | 1 | 12.38 |" in section

@@ -168,6 +168,7 @@ def test_manifest_matches_the_injections() -> None:
         + n["cross_panelist_duplicate"]
         + n["ride_tip_update"]
     )
+    assert MANIFEST["U2.superseded"] == MANIFEST["U2.groups"]
     assert MANIFEST["U3"] == n["cross_panelist_duplicate"]
     assert MANIFEST["U4.rows"] == n["near_duplicate"]
     assert MANIFEST["K1.pass"] == n["monthly_pass"]
@@ -199,9 +200,53 @@ def test_implemented_checks_match_the_manifest(
     results = run_checks(full_synthetic_derived.lazy())
     results.append(cast_failures_check(cast_failures(read_raw(full_synthetic_csv))))
     found = {r.check_id: r.n_failed for r in results}
-    expected = {k: MANIFEST[k] for k in ("S2", "A1", "U1", "S4", "S5", "U0", "V2")}
+    expected = {
+        k: MANIFEST[k]
+        for k in ("S2", "A1", "U1", "S4", "S5", "U0", "V2", "U2", "U2b", "U3", "U4")
+    }
     # K1's n_failed is the non-spend rows; K2 (unclassified templates) finds none.
     assert found == {**expected, "K1": MANIFEST["K1.non_spend"], "K2": 0}
+
+
+def test_duplicate_checks_match_the_manifest(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    u2, u2b, u3, u4 = (by_id[k] for k in ("U2", "U2b", "U3", "U4"))
+    assert (u2.n_failed, u2.details["groups"]) == (
+        MANIFEST["U2"],
+        MANIFEST["U2.groups"],
+    )
+    assert u2.details["excess_rows"] == MANIFEST["U2.superseded"]
+    assert (u3.n_failed, u3.details["groups"]) == (
+        MANIFEST["U3"],
+        MANIFEST["U3.groups"],
+    )
+    assert u4.n_failed == MANIFEST["U4"]
+    assert u4.details["rows"] == MANIFEST["U4.rows"]
+    assert (u2b.passed, u2b.n_failed) == (True, 0)
+    assert [r.passed for r in (u2, u3, u4)] == [False] * 3
+    assert u2.details["kind_pairs"] == [
+        {"pair": "ride+ride", "groups": 2, "excess_spend": pytest.approx(16.98)},
+        {"pair": "ride+tip_update", "groups": 1, "excess_spend": pytest.approx(12.38)},
+    ]
+    assert u2.details["excess_spend"] == pytest.approx(29.36)
+
+
+def test_superseded_rows_are_the_manifest_ones(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    df = full_synthetic_derived
+    flagged = {i for i, v in enumerate(df["is_superseded"]) if v}
+    assert len(flagged) == MANIFEST["U2.superseded"]
+    # The earlier email loses, except the ride, which its tip update supersedes.
+    assert flagged == {
+        INJECTIONS["duplicate_order_key"][0],
+        INJECTIONS["cross_panelist_duplicate"][0],
+        INJECTIONS["ride_tip_update"][0],
+    }
+    assert not flagged & set(INJECTIONS["monthly_pass"])
+    assert not df["is_superseded"][INJECTIONS["ride_tip_update"][1]]
 
 
 # manifest key -> receipt kind
@@ -320,6 +365,10 @@ def test_cli_end_to_end_on_the_full_fixture(
         "duplicate_rows",
         "receipt_kinds",
         "unclassified_subject_templates",
+        "duplicate_receipts",
+        "dedupe_key_unique",
+        "cross_panelist_duplicates",
+        "near_duplicate_rides",
     ]
     assert lines["non_negative_total"][1] == "FAIL"
     spend = N_ROWS - MANIFEST["K1.non_spend"]
@@ -328,6 +377,10 @@ def test_cli_end_to_end_on_the_full_fixture(
     assert lines["category_mismatch"][3] == f"{MANIFEST['V2']}/{N_ROWS}"
     assert lines["receipt_kinds"][3] == f"{MANIFEST['K1.non_spend']}/{N_ROWS}"
     assert lines["unclassified_subject_templates"][3] == f"0/{N_ROWS}"
+    for name in ("duplicate_receipts", "cross_panelist_duplicates"):
+        assert lines[name][1] == "FAIL"
+    assert lines["near_duplicate_rides"][1] == "FAIL"
+    assert lines["dedupe_key_unique"][1] == "PASS"
     for name in ("cast_failures", "checksum_unique", "duplicate_rows"):
         assert lines[name][1] == "PASS"
         assert lines[name][3].startswith("0/")

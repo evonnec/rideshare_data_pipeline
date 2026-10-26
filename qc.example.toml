@@ -49,3 +49,23 @@ enabled = true
 [checks.unclassified_subject_templates]  # K2: rows no kind rule matched (info, no threshold)
 severity = "info"
 enabled = true
+
+[checks.duplicate_receipts]  # U2: (merchant_name, order_number) repeats; warn, the dedupe resolves it
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.dedupe_key_unique]   # U2b: the key is unique among receipts the dedupe kept
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.cross_panelist_duplicates]  # U3: one order key under more than one user_id
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.near_duplicate_rides]  # U4: rides alike but for the order number (flag only)
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true

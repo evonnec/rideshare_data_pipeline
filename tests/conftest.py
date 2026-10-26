@@ -12,6 +12,7 @@ import pytest
 from fixtures.make_synthetic import build_synthetic, write_synthetic_csv
 from synthetic import synthetic_rows, write_csv_text
 
+from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.parse import derived_columns
 
 
@@ -35,5 +36,5 @@ def full_synthetic_frame() -> pl.DataFrame:
 
 @pytest.fixture(scope="session")
 def full_synthetic_derived(full_synthetic_frame: pl.DataFrame) -> pl.DataFrame:
-    """The typed frame plus the derived columns, as the checks see it."""
-    return full_synthetic_frame.with_columns(derived_columns())
+    """The typed frame plus the derived and flag columns, as the checks see it."""
+    return supersede_flags(full_synthetic_frame.with_columns(derived_columns()))
