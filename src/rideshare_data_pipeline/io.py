@@ -31,6 +31,7 @@ lazy import stat
 lazy import tarfile
 lazy import tempfile
 lazy import zlib
+lazy from concurrent.futures import Future, ThreadPoolExecutor
 lazy from zipfile import BadZipFile, ZipFile, ZipInfo
 
 lazy import polars as pl
@@ -420,6 +421,10 @@ _BLANK_LINE = re.compile(rb"\n(?=\r*\n)")
 # A chunk's last "\n" and the "\r"s after it, searched for in the last few bytes.
 _TRAILING_BREAK = re.compile(rb"\n\r*\Z")
 _TAIL_BYTES = 16
+# What follows a held-back "\n" (and its "\r"s) for it to end a blank line.
+_LEADING_BREAK = re.compile(rb"\r*\n")
+# A regex search beats bytes.count for the two-byte "\r\n" (about 4x on a large chunk).
+_CRLF = re.compile(rb"\r\n")
 
 
 def file_sha256(path: StrPath) -> str:
@@ -447,6 +452,11 @@ def _scan_bytes(
     line-ending style and the number of blank lines (empty once ``\\r`` is removed);
     the hash uses the same chunks as the validation.
     Raises EncodingError with the absolute offset of the first invalid byte.
+
+    The chunks are never copied or joined: a "\\r\\n" or a blank line that
+    straddles two chunks is settled from a few carried bytes. The hash runs on a
+    worker thread (hashlib releases the GIL on a large buffer) while this thread
+    decodes and counts, so the two overlap; one chunk is in flight at a time.
     """
     # An incremental decoder keeps a multi-byte sequence that straddles two chunks
     # buffered, so a chunk boundary is never mistaken for an error.
@@ -455,12 +465,16 @@ def _scan_bytes(
     position = crlf = lf = blank = 0
     has_bom = False
     held_back = b""
-    previous_tail = b""
-    with path.open("rb") as f:
+    previous_last = b""
+    hashing: Future[None] | None = None
+    with path.open("rb") as f, ThreadPoolExecutor(max_workers=1) as pool:
         while True:
             chunk = f.read(_CHUNK_BYTES)
             final = not chunk
-            digest.update(chunk)
+            if hashing is not None:
+                hashing.result()  # the worker is done with the previous chunk
+            if not final:
+                hashing = pool.submit(digest.update, chunk)
             if position == 0 and chunk:
                 has_bom = chunk.startswith(_BOM)
             pending = len(decoder.getstate()[0])
@@ -479,21 +493,31 @@ def _scan_bytes(
                 raise EncodingError(msg, offset=offset) from err
             if final:
                 break
-            # Prefix the last byte of the previous chunk so a "\r\n" split across
-            # the boundary is counted once; the tail alone can't hold a pair.
-            data = previous_tail + chunk
-            crlf += data.count(b"\r\n")
-            lf += data.count(b"\n")
-            previous_tail = chunk[-1:]
+            # A "\r\n" split across the boundary (the last byte of the previous
+            # chunk is "\r", the first of this one "\n") is counted once.
+            lf += chunk.count(b"\n")
+            crlf += len(_CRLF.findall(chunk))
+            if previous_last == b"\r" and chunk.startswith(b"\n"):
+                crlf += 1
+            previous_last = chunk[-1:]
             position += len(chunk)
             # A blank line is a "\n" followed by "\r"s and another "\n", so a run of
             # k line breaks holds k - 1. The last "\n" of a chunk (with any "\r"s
-            # after it) is held back and put in front of the next chunk, where
-            # its lookahead can see what follows.
-            data = held_back + chunk if held_back else chunk
-            blank += len(_BLANK_LINE.findall(data))
-            held = _TRAILING_BREAK.search(data, max(0, len(data) - _TAIL_BYTES))
-            held_back = data[held.start() :] if held else b""
+            # after it) is held back (it is at most a few bytes) and judged against
+            # the start of the next chunk, where its lookahead can see what follows.
+            if len(chunk) < _TAIL_BYTES:
+                # Too short for the tail window to stay inside it: join (a copy of
+                # a few bytes).
+                data = held_back + chunk
+                blank += len(_BLANK_LINE.findall(data))
+                held = _TRAILING_BREAK.search(data, max(0, len(data) - _TAIL_BYTES))
+                held_back = data[held.start() :] if held else b""
+                continue
+            if held_back and _LEADING_BREAK.match(chunk):
+                blank += 1
+            blank += len(_BLANK_LINE.findall(chunk))
+            held = _TRAILING_BREAK.search(chunk, len(chunk) - _TAIL_BYTES)
+            held_back = chunk[held.start() :] if held else b""
     ending = _line_ending(crlf=crlf, bare_lf=lf - crlf)
     return position, digest.hexdigest(), has_bom, ending, blank
 
@@ -712,29 +736,71 @@ def _first_line(err: Exception) -> str:
     return str(err).partition("\n")[0]
 
 
+_FAILED = "_cast_failed_"
+
+
+def _typed_with_failures(path: Path) -> pl.DataFrame:
+    """Scan the CSV once: the typed columns plus one ``_cast_failed_<col>`` flag each.
+
+    The same lazy query casts (as typed() does) and flags the values that are
+    non-null raw but null after the cast (as cast_failures() counts them), so the
+    file is parsed once instead of twice. The flags are bit-packed booleans (a few
+    MB for the 1.9M-row sample); the caller sums and drops them.
+    """
+    lf = pl.scan_csv(path, infer_schema=False)
+    return lf.with_columns(
+        *(cast_expr(col, dtype) for col, dtype in casts().items()),
+        *(
+            (pl.col(col).is_not_null() & cast_expr(col, dtype).is_null()).alias(
+                f"{_FAILED}{col}"
+            )
+            for col, dtype in casts().items()
+        ),
+    ).collect(engine="streaming")
+
+
 def read_typed(
     path: StrPath, name: str | None = None
 ) -> tuple[pl.DataFrame, FileFacts]:
     """Validate the CSV, then read it into a DataFrame with the schema's dtypes.
 
-    The raw frame is scanned twice, both times streaming: once to count cast
-    failures (CastError if there are any, before anything is built), once to cast
-    and collect. Raises InputError (or a subclass) for anything wrong with the
-    file; returns the frame and the byte-level facts.
+    The CSV is parsed once, streaming, into the typed columns and the per-column
+    cast-failure flags together (CastError if any column has a failure, before
+    anything is built). That parse and the ragged-row detection run on threads
+    (polars releases the GIL) while this thread does the byte scan, and their
+    results are judged in a fixed order: encoding and header, then ragged rows,
+    then the parse, then casts. Raises InputError (or a subclass) for anything wrong
+    with the file; returns the frame and the byte-level facts.
     """
-    name = name or Path(path).name
-    facts = inspect_csv(path, name)
-    check_ragged_rows(path, name)
-    raw = read_raw(path, inspected=facts)
-    try:
-        failures = {col: n for col, n in cast_failures(raw).items() if n}
-        if failures:
-            raise CastError(failures)
-        return typed(raw).collect(engine="streaming"), facts
-    except pl.exceptions.PolarsError as err:
-        locate_ragged_row(path, name)  # a precise error if a row's width is the cause
-        msg = f"can't parse {name}: {_first_line(err)}"
-        raise InputError(msg) from err
+    path = Path(path)
+    name = name or path.name
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ragged = pool.submit(_may_be_ragged, path)
+        parse = pool.submit(_typed_with_failures, path)
+        facts = inspect_csv(path, name)
+        if ragged.result():
+            locate_ragged_row(path, name)
+        try:
+            frame = parse.result()
+        except pl.exceptions.PolarsError as err:
+            locate_ragged_row(
+                path, name
+            )  # a precise error if a row's width is the cause
+            msg = f"can't parse {name}: {_first_line(err)}"
+            raise InputError(msg) from err
+    flags = [f"{_FAILED}{col}" for col in casts()]
+    sums = frame.select(pl.col(flags).sum()).row(0)
+    failures = {col: n for col, n in zip(casts(), sums, strict=True) if n}
+    if failures:
+        raise CastError(failures)
+    df = frame.drop(flags)
+    if facts.blank_lines:
+        # polars has no option to skip blank lines: it reads each as a row of nulls,
+        # so rows with no value at all are dropped here (FileFacts.blank_lines counts
+        # them). No real row is all-null: C1's required fields are never null, and
+        # a row whose only values fail their cast has just raised CastError.
+        df = df.filter(pl.any_horizontal(pl.all().is_not_null()))
+    return df, facts
 
 
 def write_csv(df: pl.DataFrame, path: StrPath) -> None:
