@@ -14,7 +14,7 @@ This first version validates the file's UTF-8 encoding and header, reads every c
 - CI enforces this: `tools/check_no_data.py` fails the build if a tracked file is over 1 MB, if a data or archive file is tracked outside `tests/fixtures/`, or if a tracked CSV outside it has the input schema's header. Run `uv run python tools/check_no_data.py` locally, or use it as a pre-commit hook.
 - Point the CLI at a file on your machine with `--input`. The opt-in real-data test reads the path in the `RIDESHARE_QC_DATA` environment variable.
 - The CLI writes only to the `--out` directory you name. Archives are extracted to a temporary directory that is deleted when the run ends.
-- Reports contain the input's base name and SHA-256, aggregate counts, and failing-row samples limited to the columns each rule chooses (hashed `user_id`, order number, times, amounts, receipt kind; no free-text subjects). The one place subject text appears is the `unclassified_subject_templates` check, which lists at most 20 normalised templates (masks, digits, dates and weekdays replaced) of subjects no rule recognised. They still describe real data: write them to a directory outside the repository (`.gitignore` blocks `/reports/`), and share them like the data.
+- Reports contain the input's base name and SHA-256, aggregate counts, and failing-row samples limited to the columns each rule chooses (hashed `user_id`, order number, times, amounts, receipt kind; no free-text subjects, and never the sender address, whose local part can be a person's). The one place subject text appears is the `unclassified_subject_templates` check, which lists at most 20 normalised templates (masks, digits, dates and weekdays replaced) of subjects no rule recognised. They still describe real data: write them to a directory outside the repository (`.gitignore` blocks `/reports/`), and share them like the data.
 
 ## Quick start
 
@@ -66,9 +66,9 @@ A row rule passes while its failure rate is at most its threshold (`max_failed_r
 
 The file mixes receipt types that are not rider spend, all tagged with the category `Travel`. `parse.py` derives, from the subject template, the description line, `product_reseller`, `UF-` order numbers and `order_pickup`, one of these kinds per row: `ride`, `tip_update`, `fare_correction`, `cancel_noshow`, `payment_failed`, `driver_earnings`, `pass_or_credit`, `micromobility`, `food_order`, `freight`, `rental`. The rules form an ordered chain, most specific first (see `_rules` in `parse.py`); a row no rule matches defaults to `ride` and is counted by the `unclassified_subject_templates` check. Mail-gateway prefixes (`(EXTERNAL SENDER)`, `{Disarmed}`) and leading bracket tags are stripped before matching, and a leading `[Business]` or `[Personal]` tag becomes `subject_profile`.
 
-**Rider spend.** `is_rider_spend` is true for `ride`, `tip_update`, `fare_correction` and `cancel_noshow`. Other kinds stay in the data, flagged, and are left out of spend. A cancellation fee counts as spend under its own kind. A tip update or a fare correction supersedes the receipt of the ride it amends; the dedupe flags that original (see Duplicates and dedupe). Currency gating (#15) will narrow this to USD spend.
+**Rider spend.** `is_rider_spend` is true for `ride`, `tip_update`, `fare_correction` and `cancel_noshow`. Other kinds stay in the data, flagged, and are left out of spend. A cancellation fee counts as spend under its own kind. A tip update or a fare correction supersedes the receipt of the ride it amends; the dedupe flags that original (see Duplicates and dedupe). Currency gating narrows this to USD spend (see [Currency](#currency-and-the-usd-gate)).
 
-The derived columns (`receipt_kind`, `subject_profile`, `subject_unclassified`, `is_rider_spend`) are computed once per run for the checks. They are not in the output Parquet yet; the curated dataset with flags is #22.
+The derived columns (`receipt_kind`, `subject_profile`, `subject_unclassified`, `is_rider_spend`, `sender_country`, `currency_reason`, `currency_suspect`, and the trip columns) are computed once per run for the checks. They are not in the output Parquet yet; the curated dataset with flags is #22.
 
 Checks added: `receipt_kinds` (K1, info: the kind counts and the merchant x kind matrix, shown in the report), `category_mismatch` (V2, warn: category `Travel` on a food order, freight, rental or driver earnings) and `unclassified_subject_templates` (K2, info). `non_negative_total` (A1) now applies to rider-spend receipts only: a refund on a bike or pass receipt isn't a rider-spend error.
 
@@ -96,7 +96,21 @@ The legacy whole-row duplicate check could never fire: `checksum` is unique per 
 | `cross_panelist_duplicates` (U3) | warn | one key under more than one `user_id` |
 | `near_duplicate_rides` (U4) | warn | rides identical on user, merchant, order date, total and description but with different or null order numbers (excess rows); flagged only, never deduped |
 
-U2 is a warning because a repeated key is expected vendor behaviour (re-sent receipts, a receipt in two mailboxes) that the dedupe resolves; an error would make every real run exit 1. Excess spend sums all currencies for now; #15 narrows it to USD.
+U2 is a warning because a repeated key is expected vendor behaviour (re-sent receipts, a receipt in two mailboxes) that the dedupe resolves; an error would make every real run exit 1. Excess spend is USD rider spend only; the currency-suspect part is reported apart as `excess_spend_suspect`.
+
+## Currency and the USD gate
+
+The file has no currency column, yet receipts from non-US merchant senders state amounts in local currency: about 0.5% of rows are about 37% of a naive spend total. `from_domain` is the **full sender address**, and it carries the evidence. `sender.py` derives `sender_country` from public receipt-sender patterns (`uber.<country>@` to an ISO code, `receipts.<city>@` to its country with US as the default city; generic senders such as `noreply@` give null; an unknown `uber.<token>@` is `unknown`, treated as non-US). `currency_reason` is the first of `non_us_sender`, `km_unit` (the description states kilometres) and `foreign_language` (a Spanish or Portuguese subject: `Tu ... del ...`, `por la mañana`, `Sua viagem`, `Error de pago`). `currency_suspect` is true where there is a reason. Rows are flagged, never dropped, and no exchange rate is applied (FX conversion is future work).
+
+**`usd_rides(frame)`** (`money.py`) is THE population for every money statistic and outlier baseline: rider spend, not superseded, not currency-suspect, with a non-null `order_total_amount`. A later check that sums or ranks amounts starts from it.
+
+| Check | Severity | Finds |
+|---|---|---|
+| `currency_suspect_rows` (CUR1) | warn | currency-suspect rows; details: counts and naive sums by reason and country (local currency, not summable as USD), the spend waterfall. A warning because the gate is the `usd_rides` exclusion; an error would fail every real run for an expected property of the data |
+| `merchant_sender_consistent` (V1) | error | an Uber receipt not from an Uber domain, or a Lyft receipt not from lyft.com, lyftmail.com or a subdomain |
+| `unknown_sender` (V3) | warn | a sender matching no known receipt-sender pattern (for example addresses of individual people on freight receipts; their samples never show the address) |
+
+`report.md` has a "Spend" section, and `report.json` an optional `spend` object, with the waterfall: the naive total of `order_total_amount`, minus currency-suspect rows, minus non-rider-spend kinds, minus superseded duplicates, equals the clean USD rider spend, each with its row count.
 
 ## Configuration
 
@@ -127,6 +141,8 @@ Unknown keys and unknown check names are errors (exit 2), so a typo can't silent
          elapsed_seconds, config {fail_on, sample_limit, checks {<name>: {threshold, severity}}}},
  "summary": {errors_failed, warnings_failed, info, passed, total},
  "composition": {rows, merchants, kinds: [{kind, rider_spend, total, by_merchant}]}  (optional),
+ "spend": {naive_total, currency_suspect, non_rider_spend, superseded, clean_usd_rider_spend,
+           suspect_rider_spend: {rows, amount}, note}  (optional),
  "checks": [{name, check_id, category, severity, passed, metric, threshold, n_failed, n_evaluated,
              predicate, details, sample_file (relative path or null)}],
  "exit_code": 0 | 1}
@@ -158,7 +174,9 @@ src/rideshare_data_pipeline/
   cli.py              the rideshare-qc command (argparse, `run` subcommand): summary, check lines, reports, Parquet output, exit codes
   config.py           QCConfig and CheckOverride, TOML loading (tomllib), applying overrides to rules and results
   dedupe.py           the dedupe policy: supersede_flags, deduplicated
-  parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag, distance, duration, unit, product family
+  parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag, currency reason and flag, distance, duration, unit, product family
+  sender.py           sender_country and the known-sender patterns (from_domain is the full sender address)
+  money.py            usd_rides (the population of every money statistic) and the spend waterfall
   report.py           report.json and report.md rendering, samples/<check>.parquet, exit-code policy
   report.schema.json  JSON Schema for report.json (package data)
   schema.py           the 33 expected columns, the raw all-String schema, the casts and their formats
@@ -174,13 +192,14 @@ src/rideshare_data_pipeline/
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
     parsing.py        description_parse_coverage (PC1)
+    currency.py       currency_suspect_rows (CUR1), merchant_sender_consistent (V1), unknown_sender (V3)
     structural.py     all-null and constant columns (one lazy select), duplicate rows,
                       and their DatasetCheck wrappers
 tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
   test_schema.py  test_io.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
-  test_config.py  test_report.py  test_parse.py  test_trip_parse.py
+  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```
 
@@ -203,7 +222,7 @@ Planned work is tracked in the GitHub issues:
 
 - Data hygiene and the input contract: guarding against committing data (#6), schema, header and encoding validation (#8), hardened extraction and a Parquet cache (#17).
 - Check framework and reporting: the CheckResult model and runner (#9), a synthetic fixture generator (#10), and the JSON and Markdown report with exit codes and TOML thresholds (#11, done).
-- Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15).
+- Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
 - Checks: structural and completeness (#16), arithmetic (#18), temporal (#19), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22), privacy normalization (#30), and a stakeholder summary (#31).
 - Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).

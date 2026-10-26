@@ -28,6 +28,7 @@ def receipts(*rows: Spec) -> pl.DataFrame:
         "merchant_name": "Uber",
         "order_number": None,
         "user_id": "u1",
+        "suspect": False,
         "kind": "ride",
         "email_time": t(1),
         "update_time": t(1),
@@ -56,6 +57,7 @@ def receipts(*rows: Spec) -> pl.DataFrame:
             ),
             "product_description": [r["product_description"] for r in full],
             "checksum": [r["c"] for r in full],
+            "currency_suspect": [r["suspect"] for r in full],
             "is_rider_spend": [
                 r["kind"] in ("ride", "tip_update", "fare_correction") for r in full
             ],
@@ -294,6 +296,37 @@ def test_u2_excess_spend_counts_rider_spend_rows_only() -> None:
     res = duplicate_receipts_check(df.lazy())
     assert res.details["excess_rows"] == 1
     assert res.details["excess_spend"] == 0.0
+
+
+def test_u2_excess_spend_is_usd_only_and_suspect_spend_is_separate() -> None:
+    df = receipts(
+        # a USD pair: the earlier ride is superseded (4.0)
+        {"c": "a", "order_number": "1", "order_total_amount": 4.0, "email_time": t(1)},
+        {"c": "b", "order_number": "1", "order_total_amount": 5.0, "email_time": t(2)},
+        # a suspect pair (local currency): its superseded ride is not USD spend
+        {
+            "c": "c",
+            "order_number": "2",
+            "order_total_amount": 9000.0,
+            "suspect": True,
+            "email_time": t(1),
+        },
+        {
+            "c": "d",
+            "order_number": "2",
+            "order_total_amount": 9500.0,
+            "suspect": True,
+            "email_time": t(2),
+        },
+    )
+    res = duplicate_receipts_check(df.lazy())
+    assert res.details["excess_rows"] == 2
+    assert res.details["excess_spend"] == 4.0
+    assert res.details["excess_spend_suspect"] == 9000.0
+    assert res.details["kind_pairs"] == [
+        {"pair": "ride+ride", "groups": 2, "excess_spend": 4.0}
+    ]
+    assert "USD" in str(res.details["currency"])
 
 
 def test_u2_passes_without_duplicates_and_adds_missing_flags() -> None:

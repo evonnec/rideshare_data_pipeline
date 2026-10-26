@@ -13,6 +13,7 @@ from pathlib import Path
 
 from rideshare_data_pipeline.checks.model import CheckResult, Frame, Severity
 from rideshare_data_pipeline.config import QCConfig
+from rideshare_data_pipeline.money import STEPS
 from rideshare_data_pipeline.parse import FAMILIES, KINDS
 
 SCHEMA_VERSION = 1
@@ -134,6 +135,35 @@ def composition(results: Sequence[CheckResult]) -> Json | None:
     return None
 
 
+def spend(results: Sequence[CheckResult]) -> Json | None:
+    """The spend waterfall, from the ``currency_suspect_rows`` result.
+
+    None when that check didn't run (it was disabled). Otherwise one
+    ``{"rows", "amount"}`` object per step of ``money.STEPS`` (the naive total of
+    ``order_total_amount``, what the currency-suspect rows, the non-rider-spend rows
+    and the superseded rows take off it, and the clean USD rider spend), plus
+    ``suspect_rider_spend`` (the suspect rows that would be rider spend) and a
+    ``note`` on the currency of the suspect amounts.
+    """
+    for r in results:
+        if r.name != "currency_suspect_rows":
+            continue
+        steps = r.details.get("spend")
+        extra = r.details.get("suspect_rider_spend")
+        suspect = r.details.get("suspect_sum")
+        if not (
+            isinstance(steps, Mapping)
+            and isinstance(extra, Mapping)
+            and isinstance(suspect, Mapping)
+        ):
+            return None
+        table: Json = {step: dict(steps[step]) for step in STEPS}
+        table["suspect_rider_spend"] = dict(extra)
+        table["note"] = str(suspect["note"])
+        return table
+    return None
+
+
 def _check_json(result: CheckResult) -> Json:
     return {
         "name": result.name,
@@ -187,6 +217,9 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
     table = composition(results)
     if table is not None:
         report["composition"] = table
+    waterfall = spend(results)
+    if waterfall is not None:
+        report["spend"] = waterfall
     return report
 
 
@@ -288,8 +321,8 @@ def _duplicates_section(results: Sequence[CheckResult]) -> list[str]:
         out = [
             f"{d.get('groups', 0):,} order keys repeat, in {r.n_failed:,} rows. The "
             f"dedupe flags {d.get('excess_rows', 0):,} of them as superseded (rows "
-            f"are never dropped); their rider spend is {spend_text} "
-            f"({d.get('currency', 'mixed currencies')}).",
+            f"are never dropped); their USD rider spend is {spend_text} "
+            f"({d.get('currency', 'USD only')}).",
             "",
         ]
         if pairs:
@@ -304,6 +337,74 @@ def _duplicates_section(results: Sequence[CheckResult]) -> list[str]:
             out.append("")
         return out
     return ["_Not available: the duplicate_receipts check is disabled._", ""]
+
+
+def _money(cell: object) -> tuple[str, str]:
+    """(rows, amount) text of a ``{"rows", "amount"}`` cell."""
+    assert isinstance(cell, Mapping)
+    return f"{cell['rows']:,}", f"{cell['amount']:,.2f}"
+
+
+_SPEND_LABELS = {
+    "naive_total": "naive total of order_total_amount (all rows, mixed currencies)",
+    "currency_suspect": "minus currency-suspect rows (local currency)",
+    "non_rider_spend": "minus non-rider-spend kinds",
+    "superseded": "minus superseded duplicates",
+    "clean_usd_rider_spend": "**= clean USD rider spend**",
+}
+_TOP_COUNTRIES = 10
+
+
+def _spend_section(results: Sequence[CheckResult]) -> list[str]:
+    """The "Spend" section body: the waterfall and the currency-suspect breakdown."""
+    table = spend(results)
+    if table is None:
+        return ["_Not available: the currency_suspect_rows check is disabled._", ""]
+    rows = []
+    for step, label in _SPEND_LABELS.items():
+        n, amount = _money(table[step])
+        sign = "" if step in ("naive_total", "clean_usd_rider_spend") else "-"
+        rows.append([label, n, f"{sign}{amount}"])
+    out = [
+        "Receipts with an amount; the file has no currency column. Rows are flagged, "
+        "never dropped, and no exchange rate is applied.",
+        "",
+        *_table(["step", "rows", "amount"], rows, right=(1, 2)),
+        "",
+    ]
+    n, amount = _money(table["suspect_rider_spend"])
+    out += [
+        f"Currency-suspect rows that would otherwise be rider spend: {n} "
+        f"({amount}; {table['note']}).",
+        "",
+    ]
+    for r in results:
+        if r.name != "currency_suspect_rows":
+            continue
+        reasons, countries = r.details.get("by_reason"), r.details.get("by_country")
+        if isinstance(reasons, Mapping) and reasons:
+            out += [
+                *_table(
+                    ["currency reason", "rows", "amount (local currency)"],
+                    [[k, *_money(v)] for k, v in reasons.items()],
+                    right=(1, 2),
+                ),
+                "",
+            ]
+        if isinstance(countries, Mapping) and countries:
+            top = list(countries.items())[:_TOP_COUNTRIES]
+            out += [
+                f"Top {len(top)} of {len(countries)} sender countries "
+                "((none) is a generic sender):",
+                "",
+                *_table(
+                    ["sender country", "rows", "amount (local currency)"],
+                    [[k, *_money(v)] for k, v in top],
+                    right=(1, 2),
+                ),
+                "",
+            ]
+    return out
 
 
 def _parsing_section(results: Sequence[CheckResult]) -> list[str]:
@@ -408,6 +509,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out += _composition_table(results)
     out += ["## Duplicate receipts", ""]
     out += _duplicates_section(results)
+    out += ["## Spend", ""]
+    out += _spend_section(results)
     out += ["## Description parsing", ""]
     out += _parsing_section(results)
     out += ["## Column profile", ""]

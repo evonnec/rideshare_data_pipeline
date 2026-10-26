@@ -39,6 +39,7 @@ class Case:
     order_number: str | None = "0b1d2c3e-0000-4000-8000-000000000001"
     pickup: int = 1
     merchant: str = "Uber"
+    sender: str | None = None
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -53,6 +54,7 @@ def frame(cases: list[Case]) -> pl.DataFrame:
             "order_number": [c.order_number for c in cases],
             "order_pickup": pl.Series([c.pickup for c in cases], dtype=pl.Int8),
             "product_category": ["Travel"] * len(cases),
+            "from_domain": pl.Series([c.sender for c in cases], dtype=pl.String),
         },
         schema_overrides={
             "email_subject": pl.String,
@@ -323,7 +325,7 @@ def test_kinds_are_an_enum_column_in_canonical_order() -> None:
     assert df.schema["receipt_kind"] == pl.Enum(KINDS)
     assert df.schema["is_rider_spend"] == pl.Boolean
     assert df.columns[-len(DERIVED_NAMES) :] == list(DERIVED_NAMES)
-    assert input_columns(df.lazy()).collect_schema().names()[-1] == "product_category"
+    assert input_columns(df.lazy()).collect_schema().names()[-1] == "from_domain"
 
 
 def test_with_derived_equals_with_columns_of_derived_columns() -> None:

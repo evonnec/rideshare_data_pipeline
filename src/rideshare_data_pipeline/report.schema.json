@@ -125,6 +125,32 @@
         }
       }
     },
+    "spend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["naive_total", "currency_suspect", "non_rider_spend", "superseded", "clean_usd_rider_spend", "suspect_rider_spend", "note"],
+      "description": "The spend waterfall; present when the currency_suspect_rows check ran. Rows are counted and amounts summed over receipts with an order_total_amount. clean_usd_rider_spend = naive_total - currency_suspect - non_rider_spend - superseded; each row is in exactly one of the last four groups. No FX conversion is applied.",
+      "properties": {
+        "naive_total": { "$ref": "#/$defs/spend_cell" },
+        "currency_suspect": { "$ref": "#/$defs/spend_cell" },
+        "non_rider_spend": { "$ref": "#/$defs/spend_cell" },
+        "superseded": { "$ref": "#/$defs/spend_cell" },
+        "clean_usd_rider_spend": { "$ref": "#/$defs/spend_cell" },
+        "suspect_rider_spend": { "$ref": "#/$defs/spend_cell" },
+        "note": { "type": "string", "description": "The currency caveat on the suspect amounts." }
+      }
+    },
     "exit_code": { "enum": [0, 1], "description": "The exit status of the run (2 is never written: input errors produce no report)." }
+  },
+  "$defs": {
+    "spend_cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "amount"],
+      "properties": {
+        "rows": { "type": "integer", "minimum": 0 },
+        "amount": { "type": "number", "description": "Sum of order_total_amount, rounded to cents." }
+      }
+    }
   }
 }

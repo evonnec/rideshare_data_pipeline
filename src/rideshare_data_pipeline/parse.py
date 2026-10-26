@@ -20,7 +20,17 @@ charge, products that aren't a trip, or another service's receipts. A
 cancellation fee counts as rider spend under its own kind. A tip update or a fare
 correction supersedes the receipt of the ride it amends; removing the superseded
 receipt is the dedupe's job, not this module's. Currency gating (the file has no
-currency column) narrows this to USD spend separately.
+currency column) narrows this to USD spend separately: see ``money.usd_rides``.
+
+Currency risk
+-------------
+The file has no currency column, and receipts from non-US merchant senders state
+amounts in local currency. ``currency_reason`` says why a row is suspect, the first
+of: ``non_us_sender`` (``sender_country`` is neither us nor null; see
+``sender.py``), ``km_unit`` (the description states kilometres, which a US sender's
+receipt does not) and ``foreign_language`` (a Spanish or Portuguese subject; see
+``_FOREIGN_SUBJECT``). ``currency_suspect`` is true where there is a reason. Rows are
+flagged, never dropped, and no exchange rate is applied.
 
 Precedence
 ----------
@@ -45,6 +55,7 @@ from collections.abc import Mapping
 lazy import polars as pl
 
 from rideshare_data_pipeline.dedupe import FLAG_NAMES
+from rideshare_data_pipeline.sender import NON_US_EXEMPT, sender_country
 
 type Kind = str
 """One of KINDS."""
@@ -172,6 +183,17 @@ def subject_template() -> pl.Expr:
     )
 
 
+# Spanish and Portuguese receipt subjects, on the cleaned subject: "Tu viaje del
+# lunes por la mañana ...", "Tu <product> del ...", "Sua viagem de segunda-feira
+# ...", "Error de pago: Tu ...". Any of these phrases marks the row.
+_FOREIGN_SUBJECT = (
+    r"(?i)^(?:error de pago:?\s*)?tu\b|^sua\b"
+    r"|\bpor la (?:ma[nñ]ana|tarde|noche|madrugada)\b|\bviaje\b|\bviagem\b"
+)
+
+CURRENCY_REASONS: tuple[str, ...] = ("non_us_sender", "km_unit", "foreign_language")
+"""Why a row is currency-suspect, in precedence order (the first that holds)."""
+
 # The description is read with a few simple regexes and keyword scans rather than
 # one regex per template: a regex that captures several groups is several times
 # slower on 1.9M rows than the same work in single-group passes.
@@ -292,6 +314,36 @@ def duration_s() -> pl.Expr:
 def product_family() -> pl.Expr:
     """The product family (Enum FAMILIES); null if the description isn't a trip."""
     return _family(_raw()).alias("product_family")
+
+
+def foreign_subject() -> pl.Expr:
+    """True where the cleaned subject is Spanish or Portuguese (_FOREIGN_SUBJECT)."""
+    return clean_subject().str.contains(_FOREIGN_SUBJECT).fill_null(False)
+
+
+def _reason(country: pl.Expr, km: pl.Expr, foreign: pl.Expr) -> pl.Expr:
+    """The first currency reason that holds (see CURRENCY_REASONS), else null."""
+    return (
+        pl.when(country.is_not_null() & ~country.is_in(NON_US_EXEMPT))
+        .then(pl.lit("non_us_sender"))
+        .when(km.fill_null(False))
+        .then(pl.lit("km_unit"))
+        .when(foreign)
+        .then(pl.lit("foreign_language"))
+        .cast(pl.Enum(CURRENCY_REASONS))
+    )
+
+
+def currency_reason() -> pl.Expr:
+    """Why the row is currency-suspect (Enum CURRENCY_REASONS), null if not."""
+    return _reason(sender_country(), distance_unit() == "km", foreign_subject()).alias(
+        "currency_reason"
+    )
+
+
+def currency_suspect() -> pl.Expr:
+    """True where the amount may not be in USD: ``currency_reason`` is set."""
+    return currency_reason().is_not_null().alias("currency_suspect")
 
 
 def _rules() -> tuple[tuple[Kind, pl.Expr], ...]:
@@ -417,6 +469,9 @@ DERIVED_NAMES: tuple[str, ...] = (
     "subject_profile",
     "subject_unclassified",
     "is_rider_spend",
+    "sender_country",
+    "currency_reason",
+    "currency_suspect",
     "distance_mi",
     "distance_unit",
     "duration_s",
@@ -440,6 +495,9 @@ def derived_columns() -> list[pl.Expr]:
         subject_profile(),
         subject_unclassified(),
         is_rider_spend(),
+        sender_country(),
+        currency_reason(),
+        currency_suspect(),
         distance_mi(),
         distance_unit(),
         duration_s(),
@@ -448,6 +506,7 @@ def derived_columns() -> list[pl.Expr]:
 
 
 _MATCHED = "_matched_kind"
+_FOREIGN = "_foreign_subject"
 _RAW = "_raw_"
 
 
@@ -464,11 +523,13 @@ def with_derived(df: pl.DataFrame) -> pl.DataFrame:
     """
     matched = pl.col(_MATCHED)
     raw = _stored(_RAW)
-    temp = [_MATCHED, *(f"{_RAW}{key}" for key in raw)]
+    temp = [_MATCHED, _FOREIGN, *(f"{_RAW}{key}" for key in raw)]
     return (
         df.with_columns(
             _first_match().alias(_MATCHED),
             subject_profile(),
+            sender_country(),
+            foreign_subject().alias(_FOREIGN),
             *(expr.alias(f"{_RAW}{key}") for key, expr in _raw().items()),
         )
         .with_columns(
@@ -477,11 +538,15 @@ def with_derived(df: pl.DataFrame) -> pl.DataFrame:
             matched.fill_null("ride")
             .is_in(sorted(RIDER_SPEND_KINDS))
             .alias("is_rider_spend"),
+            _reason(
+                pl.col("sender_country"), _unit(raw) == "km", pl.col(_FOREIGN)
+            ).alias("currency_reason"),
             _miles(raw).alias("distance_mi"),
             _unit(raw).alias("distance_unit"),
             _seconds(raw).alias("duration_s"),
             _family(raw).alias("product_family"),
         )
+        .with_columns(pl.col("currency_reason").is_not_null().alias("currency_suspect"))
         .drop(temp)
         .select(*df.columns, *DERIVED_NAMES)
     )

@@ -173,8 +173,10 @@ def test_registry_rules() -> None:
         "non_negative_total": Severity.ERROR,
         "checksum_unique": Severity.ERROR,
         "category_mismatch": Severity.WARN,
+        "merchant_sender_consistent": Severity.ERROR,
+        "unknown_sender": Severity.WARN,
     }
-    assert len(default_dataset_checks()) == 10
+    assert len(default_dataset_checks()) == 11
 
 
 def test_registered_rules_on_synthetic_data(tmp_path: Path) -> None:

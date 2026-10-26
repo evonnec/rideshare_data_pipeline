@@ -11,6 +11,7 @@ import pytest
 from fixtures.make_synthetic import (
     INJECTIONS,
     MANIFEST,
+    USD_AMOUNT,
     build_rows,
     build_synthetic,
     main,
@@ -22,6 +23,7 @@ from rideshare_data_pipeline.checks import run_checks
 from rideshare_data_pipeline.checks.structural import cast_failures_check
 from rideshare_data_pipeline.cli import main as qc_main
 from rideshare_data_pipeline.io import cast_failures, read_raw
+from rideshare_data_pipeline.money import usd_rides
 from rideshare_data_pipeline.parse import KINDS
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
 
@@ -202,7 +204,22 @@ def test_implemented_checks_match_the_manifest(
     found = {r.check_id: r.n_failed for r in results}
     expected = {
         k: MANIFEST[k]
-        for k in ("S2", "A1", "U1", "S4", "S5", "U0", "V2", "U2", "U2b", "U3", "U4")
+        for k in (
+            "S2",
+            "A1",
+            "U1",
+            "S4",
+            "S5",
+            "U0",
+            "V2",
+            "U2",
+            "U2b",
+            "U3",
+            "U4",
+            "CUR1",
+            "V1",
+            "V3",
+        )
     }
     # K1's n_failed is the non-spend rows; K2 (unclassified templates) finds none.
     assert found == {
@@ -210,6 +227,65 @@ def test_implemented_checks_match_the_manifest(
         "K1": MANIFEST["K1.non_spend"],
         "K2": 0,
         "PC1": MANIFEST["PC1"],
+    }
+
+
+def test_currency_and_sender_checks_match_the_manifest(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    df = full_synthetic_derived
+    by_id = {r.check_id: r for r in run_checks(df.lazy())}
+    cur1, v1, v3 = by_id["CUR1"], by_id["V1"], by_id["V3"]
+    assert cur1.n_failed == MANIFEST["CUR1"]
+    assert not cur1.passed
+    by_reason = cur1.details["by_reason"]
+    assert isinstance(by_reason, dict)
+    assert {k: v["rows"] for k, v in by_reason.items()} == {
+        "non_us_sender": MANIFEST["CUR1.non_us"],
+        "km_unit": MANIFEST["CUR1.km_generic"],
+    }
+    assert (v1.n_failed, v1.passed) == (MANIFEST["V1"], True)
+    assert (v3.n_failed, v3.passed) == (MANIFEST["V3"], False)
+    # V3 finds the freight sender, and its sample never carries the address.
+    assert v3.sample is not None
+    (freight,) = INJECTIONS["freight"]
+    assert v3.sample["checksum"].to_list() == [df["checksum"][freight]]
+    assert "from_domain" not in v3.sample.columns
+
+
+def test_usd_rides_excludes_the_gated_rows(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    df = full_synthetic_derived
+    usd = usd_rides(df)
+    assert usd.height == MANIFEST["USD.rides"]
+    assert usd["order_total_amount"].sum() == pytest.approx(USD_AMOUNT)
+    kept = set(usd["checksum"])
+    for name in ("non_us_sender", "km_generic_sender", "apac_next_day"):
+        (i,) = INJECTIONS[name]
+        assert df["checksum"][i] not in kept
+        assert df["currency_suspect"][i]
+    # None of the suspect rows is a fare outlier of the USD baseline: the 5,718
+    # local-currency total is gone from the statistics.
+    assert usd.select(pl.col("order_total_amount").max() < 1000).item()
+    assert df.filter(pl.col("currency_suspect")).height == MANIFEST["CUR1"]
+
+
+def test_spend_waterfall_of_the_fixture(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    df = full_synthetic_derived
+    spend = next(r for r in run_checks(df.lazy()) if r.check_id == "CUR1").details[
+        "spend"
+    ]
+    assert isinstance(spend, dict)
+    assert spend["naive_total"]["rows"] == N_ROWS
+    assert spend["currency_suspect"]["rows"] == MANIFEST["CUR1"]
+    assert spend["non_rider_spend"]["rows"] == MANIFEST["K1.non_spend"]
+    assert spend["superseded"]["rows"] == MANIFEST["U2.superseded"]
+    assert spend["clean_usd_rider_spend"] == {
+        "rows": MANIFEST["USD.rides"],
+        "amount": USD_AMOUNT,
     }
 
 
@@ -365,6 +441,8 @@ def test_cli_end_to_end_on_the_full_fixture(
         "non_negative_total",
         "checksum_unique",
         "category_mismatch",
+        "merchant_sender_consistent",
+        "unknown_sender",
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
@@ -375,6 +453,7 @@ def test_cli_end_to_end_on_the_full_fixture(
         "cross_panelist_duplicates",
         "near_duplicate_rides",
         "description_parse_coverage",
+        "currency_suspect_rows",
     ]
     assert lines["non_negative_total"][1] == "FAIL"
     spend = N_ROWS - MANIFEST["K1.non_spend"]
