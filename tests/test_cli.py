@@ -175,6 +175,8 @@ def test_csv_end_to_end(
         "description_parse_coverage",
         "currency_suspect_rows",
         "date_only_order_time",
+        "fare_outlier_conditional",
+        "fare_outlier_univariate",
     ]
     assert all(line.split()[1] == "PASS" for line in check_lines)
     found = summary(stdout)

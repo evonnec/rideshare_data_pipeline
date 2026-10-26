@@ -20,6 +20,7 @@ from fixtures.make_synthetic import (
 from synthetic import ALL_NULL, CONSTANT, read_typed_frame
 
 from rideshare_data_pipeline.checks import run_checks
+from rideshare_data_pipeline.checks.outliers import score
 from rideshare_data_pipeline.checks.structural import (
     cast_failures_check,
     header_valid_check,
@@ -248,6 +249,8 @@ def test_implemented_checks_match_the_manifest(
             "T4",
             "T5",
             "T6",
+            "O4",
+            "O5",
         )
     }
     # K1's n_failed is the non-spend rows; K2 (unclassified templates) finds none.
@@ -550,6 +553,40 @@ def test_date_only_check_matches_the_manifest(
     assert merchants["Lyft"]["date_only"] == 0
 
 
+def test_fare_outliers_hit_the_injection_and_nothing_else(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    d = full_synthetic_derived
+    o4, o5 = by_id["O4"], by_id["O5"]
+    assert (o4.n_failed, o4.passed) == (MANIFEST["O4"], False)
+    assert o4.n_evaluated == 277  # USD rides with >= 0.5 mi, >= 60 s and a family
+    (outlier,) = INJECTIONS["fare_outlier_10x"]
+    assert o4.sample is not None
+    assert o4.sample["checksum"].to_list() == [d["checksum"][outlier]]
+    # Not flagged: the 60-mile trip at a normal $/mile (a $/minute outlier only), the
+    # local-currency Colombia row (gated out by the currency gate) and the km row.
+    (fast,) = INJECTIONS["implausible_speed"]
+    (colombia,) = INJECTIONS["non_us_sender"]
+    assert d["checksum"][fast] not in o4.sample["checksum"].to_list()
+    assert d["checksum"][colombia] not in o4.sample["checksum"].to_list()
+    assert d["order_total_amount"][colombia] == 5718.0
+    assert d["currency_suspect"][colombia]
+    # O5 is context: it flags the injected fare and the (legitimate) 60-mile trip.
+    assert (o5.n_failed, o5.passed) == (MANIFEST["O5"], True)
+    merchants = o5.details["by_merchant"]
+    assert isinstance(merchants, dict)
+    assert merchants["Uber"]["flagged"] == MANIFEST["O5"]
+    assert merchants["Lyft"]["flagged"] == 0
+    scores = score(d.lazy()).frame
+    o5_rows = scores.filter(pl.col("rz_total").abs() > 3.5)["_row"].to_list()
+    assert sorted(o5_rows) == sorted([outlier, fast])
+    # every baseline segment is big enough to be scored
+    assert o4.details["scored"] == o4.n_evaluated
+    assert o4.details["by_direction"] == {"high": 1, "low": 0, "mixed": 0}
+    assert o4.details["k"] == 4.0
+
+
 def test_degenerate_columns_are_the_documented_ones(
     full_synthetic_derived: pl.DataFrame,
 ) -> None:
@@ -615,6 +652,8 @@ def test_cli_end_to_end_on_the_full_fixture(
         "description_parse_coverage",
         "currency_suspect_rows",
         "date_only_order_time",
+        "fare_outlier_conditional",
+        "fare_outlier_univariate",
     ]
     assert lines["non_negative_total"][1] == "FAIL"
     spend = N_ROWS - MANIFEST["K1.non_spend"]

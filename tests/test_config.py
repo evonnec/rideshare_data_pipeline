@@ -191,3 +191,61 @@ def test_configure_results_cuts_samples_to_the_sample_limit() -> None:
     (out,) = configure_results([result(sample=sample)], QCConfig(sample_limit=2))
     assert out.sample is not None
     assert out.sample["x"].to_list() == [1, 2]
+
+
+# --- check params (#20) ---------------------------------------------------------
+
+
+def test_params_parse_and_reach_check_params(tmp_path: Path) -> None:
+    config = load_config(
+        write(
+            tmp_path,
+            "[checks.fare_outlier_conditional.params]\nk = 5\n"
+            "[checks.fare_outlier_univariate]\nseverity = 'info'\n"
+            "[checks.fare_outlier_univariate.params]\nk = 2.5\n",
+        )
+    )
+    assert config.checks["fare_outlier_conditional"].params == {"k": 5.0}
+    assert isinstance(config.checks["fare_outlier_conditional"].params["k"], float)
+    assert config.check_params() == {
+        "fare_outlier_conditional": {"k": 5.0},
+        "fare_outlier_univariate": {"k": 2.5},
+    }
+    assert QCConfig().check_params() == {}
+    assert CheckOverride().params == {}
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            "[checks.fare_outlier_conditional.params]\nkay = 4",
+            "unknown 'kay' (known: k)",
+        ),
+        ("[checks.duplicate_rows.params]\nk = 4", "unknown 'k' (known: )"),
+        ("[checks.fare_outlier_conditional.params]\nk = 0", "greater than 0"),
+        ("[checks.fare_outlier_conditional.params]\nk = -1.5", "greater than 0"),
+        ("[checks.fare_outlier_univariate.params]\nk = 'x'", "greater than 0"),
+        ("[checks.fare_outlier_univariate.params]\nk = true", "greater than 0"),
+        ("[checks.fare_outlier_univariate.params]\nk = nan", "greater than 0"),
+        ("[checks.fare_outlier_univariate.params]\nk = inf", "greater than 0"),
+        (
+            "[checks.fare_outlier_conditional]\nparams = 4",
+            "params\\]: expected a table",
+        ),
+    ],
+)
+def test_invalid_params_raise(tmp_path: Path, text: str, message: str) -> None:
+    with pytest.raises(
+        ConfigError, match=message.replace("(", r"\(").replace(")", r"\)")
+    ):
+        load_config(write(tmp_path, text))
+
+
+def test_shipped_example_sets_the_default_ks() -> None:
+    example = Path(__file__).parent.parent / "qc.example.toml"
+    config = load_config(example)
+    assert config.check_params() == {
+        "fare_outlier_conditional": {"k": 4.0},
+        "fare_outlier_univariate": {"k": 3.5},
+    }

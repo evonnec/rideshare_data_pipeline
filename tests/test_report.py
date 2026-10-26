@@ -58,6 +58,8 @@ IMPLEMENTED = (
     "T4",
     "T5",
     "T6",
+    "O4",
+    "O5",
 )
 ARITH_WARNS = ("zero_fare_rides", "discount_within_subtotal", "tax_within_total")
 DUPLICATE_CHECKS = (
@@ -69,6 +71,7 @@ DUPLICATE_CHECKS = (
     "near_duplicate_rides",
     "late_receipts",
     "order_before_window",
+    "fare_outlier_conditional",
     *ARITH_WARNS,
 )
 LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n" + "".join(
@@ -152,6 +155,7 @@ def test_run_writes_reports_and_samples(
         "cross_panelist_duplicates.parquet",
         "discount_within_subtotal.parquet",
         "duplicate_receipts.parquet",
+        "fare_outlier_conditional.parquet",
         "id_formats.parquet",
         "late_receipts.parquet",
         "near_duplicate_rides.parquet",
@@ -205,10 +209,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 12,  # V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4
-        "info": 6,
-        "passed": 22,
-        "total": 35,
+        "warnings_failed": 13,  # V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4, O4
+        "info": 7,
+        "passed": 23,
+        "total": 37,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -428,7 +432,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 13  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4
+    assert report["summary"]["warnings_failed"] == 14  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5, T3, T4, O4
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
@@ -753,3 +757,59 @@ def test_report_arithmetic_section_when_a7_is_disabled(
     )
     text = (out / "report.md").read_text(encoding="utf-8")
     assert "_Not available: the identity_share check is disabled._" in text
+
+
+# --- outliers (#20) -------------------------------------------------------------
+
+
+def test_outliers_section_shows_k_rate_and_the_sensitivity_table(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    text = (out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Outliers")[1].split("## Column profile")[0]
+    assert "k = 4," in section
+    assert f"flagged 1 of 277 eligible rides (flag rate {1 / 277:.4%})" in section
+    for k in ("3", "3.5", "4", "5"):
+        assert f"| {k} | 1 | {1 / 277:.4%} |" in section
+    assert "| high | 1 |" in section
+    assert "| Uber | uberx | 148 | 1 |" in section
+    assert "| uberx | 148 |" in section
+    assert "context only: mostly long legitimate trips" in section
+    assert "not a false-positive rate" in section
+    assert "no machine learning" in section.lower()
+    report = load(out)
+    o4 = checks_by_name(report)["fare_outlier_conditional"]
+    assert o4["details"]["k"] == 4.0  # type: ignore[index]
+    assert o4["sample_file"] == "samples/fare_outlier_conditional.parquet"
+    jsonschema.validate(report, json.loads(schema_text()))
+
+
+def test_outliers_section_reflects_a_configured_k(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    config = LOOSE_V2 + "[checks.fare_outlier_conditional.params]\nk = 6.5\n"
+    run_cli(full_synthetic_csv, out, config=config)
+    section = (out / "report.md").read_text(encoding="utf-8").split("## Outliers")[1]
+    assert "k = 6.5," in section.split("## Column profile")[0]
+    o4 = checks_by_name(load(out))["fare_outlier_conditional"]
+    assert o4["details"]["k"] == 6.5  # type: ignore[index]
+    assert "6.5" in o4["predicate"]  # type: ignore[operator]
+
+
+def test_outliers_section_when_both_checks_are_disabled(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    config = (
+        LOOSE_V2.replace(
+            "[checks.fare_outlier_conditional]\n",
+            "[checks.fare_outlier_conditional]\nenabled = false\n",
+        )
+        + "[checks.fare_outlier_univariate]\nenabled = false\n"
+    )
+    run_cli(full_synthetic_csv, out, config=config)
+    text = (out / "report.md").read_text(encoding="utf-8")
+    assert "_Not available: both outlier checks are disabled._" in text

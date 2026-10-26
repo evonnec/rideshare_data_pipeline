@@ -12,6 +12,9 @@ The TOML file has four top-level keys and one table per check::
     severity = "warn"  # "error", "warn" or "info"
     enabled = true  # false drops the check from the run and the report
 
+    [checks.fare_outlier_conditional.params]  # per-check numbers (see PARAM_NAMES)
+    k = 4.0  # both |robust z| of $/mile and $/minute must exceed this
+
 Unknown keys or check names are errors (ConfigError, exit status 2), so a typo
 can't silently do nothing. So is a config that leaves no check enabled, and
 ``enabled = false`` for ``cast_failures``: that check records that the strict parse
@@ -24,6 +27,7 @@ function that touches the file system.
 
 import contextlib
 import dataclasses
+import math
 import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -35,6 +39,7 @@ from rideshare_data_pipeline.checks.model import (
     RowRule,
     Severity,
 )
+from rideshare_data_pipeline.checks.outliers import PARAM_NAMES
 from rideshare_data_pipeline.io import InputError, StrPath
 
 # Every check a run can report, in report order: the registered row rules, then
@@ -75,12 +80,14 @@ KNOWN_CHECKS: tuple[str, ...] = (
     "description_parse_coverage",
     "currency_suspect_rows",
     "date_only_order_time",
+    "fare_outlier_conditional",
+    "fare_outlier_univariate",
 )
 
 # `fail_on` can only be a gating severity: info checks never gate.
 _FAIL_ON = (Severity.ERROR, Severity.WARN)
 _TOP_KEYS = frozenset({"sample_limit", "fail_on", "min_rows", "max_rows", "checks"})
-_CHECK_KEYS = frozenset({"max_failed_rate", "severity", "enabled"})
+_CHECK_KEYS = frozenset({"max_failed_rate", "severity", "enabled", "params"})
 # Checks that cannot be switched off.
 ALWAYS_ENABLED: frozenset[str] = frozenset({"cast_failures"})
 
@@ -96,6 +103,9 @@ class CheckOverride:
     max_failed_rate: float | None = None
     severity: Severity | None = None
     enabled: bool = True
+    params: Mapping[str, float] = field(default_factory=dict)
+    """Numbers a check takes (``[checks.<name>.params]``), e.g. ``k``; only the
+    names in ``PARAM_NAMES[name]`` are accepted, each a number greater than 0."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +127,10 @@ class QCConfig:
         """The override for `name`, or the no-op default."""
         return self.checks.get(name, CheckOverride())
 
+    def check_params(self) -> dict[str, Mapping[str, float]]:
+        """The configured params, ``{check name: {param: value}}`` (those set only)."""
+        return {n: o.params for n, o in self.checks.items() if o.params}
+
 
 def _severity(value: object, where: str, allowed: Iterable[Severity]) -> Severity:
     options = tuple(allowed)
@@ -137,6 +151,27 @@ def _unknown(keys: Iterable[str], allowed: Iterable[str], where: str) -> None:
         known = ", ".join(sorted(allowed))
         msg = f"{where}: unknown {', '.join(map(repr, bad))} (known: {known})"
         raise ConfigError(msg)
+
+
+def _params(name: str, value: object) -> dict[str, float]:
+    """Validate ``[checks.<name>.params]`` against the check's known params."""
+    where = f"[checks.{name}.params]"
+    if not isinstance(value, dict):
+        msg = f"{where}: expected a table"
+        raise ConfigError(msg)
+    _unknown(value, PARAM_NAMES.get(name, ()), where)
+    out: dict[str, float] = {}
+    for key, number in value.items():
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int | float)
+            or not math.isfinite(number)
+            or number <= 0
+        ):
+            msg = f"{where} {key}: expected a number greater than 0, got {number!r}"
+            raise ConfigError(msg)
+        out[key] = float(number)
+    return out
 
 
 def _override(name: str, table: object) -> CheckOverride:
@@ -171,6 +206,7 @@ def _override(name: str, table: object) -> CheckOverride:
         if severity is None
         else _severity(severity, f"{where} severity", Severity),
         enabled=enabled,
+        params=_params(name, table.get("params", {})),
     )
 
 

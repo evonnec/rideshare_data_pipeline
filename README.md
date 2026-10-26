@@ -221,6 +221,23 @@ They compare the receipt's timestamps with each other, on every row (superseded 
 
 The 7 and 30 day thresholds and the 1 day tolerance are constants in `checks/temporal.py`, not config keys. T4 is a row rule whose predicate holds the aggregate `email_time.min()`; inside the one select that is a scalar, so it shares the single scan. The report has a "Time" section: the email window, the T2 tolerance with its no-tolerance count, the T3 counts and the date-only share per merchant. On the full real file: T1 0, T2 0 (380 without the tolerance), T3 2,757 (968 over 30 days), T4 828, T5 19, and Uber `order_time` is date-only on about 99.6% of rows.
 
+## Fare outliers
+
+| ID | Check | Severity | Rule |
+| --- | --- | --- | --- |
+| O4 | `fare_outlier_conditional` | warn | on USD rides with `distance_mi >= 0.5`, `duration_s >= 60` and a product family: `\|rz(log $/mile)\| > k` AND `\|rz(log $/minute)\| > k` within merchant x product family (`k` defaults to 4) |
+| O5 | `fare_outlier_univariate` | info | `\|rz(log total)\| > k` within merchant (`k` defaults to 3.5); context only, never fails |
+
+**Method** (`checks/outliers.py`). Fares are heavy-tailed, roughly log-normal, and grow with distance and product, so a raw z-score or a Tukey fence flags 1-3% of rows and about 99.7% of the high flags have a normal price per mile: they are long trips. The checks therefore score within a **segment** (merchant x product family), on a **log scale** with a **robust** spread, and **conditional on the price drivers**:
+
+- `robust_z(expr, by)` is `(x - median) / (1.4826 * MAD)` with both taken `.over(by)` (`MAD = median(|x - median|)`; 1.4826 makes it match a standard deviation under a normal). It is null, never infinite, when a group's MAD is 0 or the group has fewer than `MIN_GROUP` (30) values, and `log_positive` takes the log only where the value is positive, so a zero or negative input has no score.
+- O4 needs both the price per mile and the price per minute to be extreme, so a long trip (high fare, ordinary $/mile) is not flagged, nor is a trip that is merely fast or slow (implausible speed is #21's). The sample shows the receipt columns plus `distance_mi`, `duration_s`, `product_family`, the two prices and the two scores, the most extreme first.
+- Both checks use `money.positive_usd_rides` (USD rider spend, not superseded, not currency-suspect, total > 0) restricted to the kinds `ride` and `tip_update`; zero totals are A3's and negative ones A1's.
+- The threshold `k` is a **review budget**, not a false-positive rate: the report shows the flag rate at the configured `k` and a table at k = 3, 3.5, 4 and 5, computed in the same pass. Both checks share one scoring pass.
+- There is **no machine learning**: an isolation forest was tried and rejected (36 of 1,000 flags overlapped with these, and it gives no reason to read for a flag), while a log-scale robust z says why a row was flagged.
+
+On the full real file, O4 at k = 4 flags about 0.115% of rides (1,988 of 1,730,233); nearly all are both-prices-low rides (near-zero fares). O5 flags about 0.47%, mostly long legitimate trips. The report has an "Outliers" section: k and the flag rate, the k table, the direction split (both prices high, both low, mixed), the top segments, the median $/mile and $/minute per product family, and a method note.
+
 ## Assumptions
 
 **Local time versus UTC.** `order_time` is the trip's local time (the rider's wall clock) and `email_time` is UTC. The evidence: the Lyft lag `email_time - order_time` is never below 4 h and peaks at 5 h and 7 h (US offsets plus a few minutes for the receipt), and every row whose `order_time` is after its `email_time` comes from a sender east of UTC (Asia-Pacific). The two columns are not on one clock, so the checks compare dates, not instants, and never a time of day. This was an owner decision, taken on that evidence.
@@ -247,7 +264,14 @@ severity = "warn"          # "error", "warn" or "info"
 enabled = true             # false removes the check from the run and the report
 ```
 
-Unknown keys and unknown check names are errors (exit 2), so a typo can't silently do nothing. So is a config that leaves no check enabled, and `enabled = false` for `cast_failures`. The effective thresholds and severities are recorded in the report. A `max_failed_rate` on a dataset check (for example `duplicate_rows`) replaces its threshold and re-judges it against its measured rate.
+A check with numbers of its own takes a `[checks.<name>.params]` table. The fare-outlier checks accept `k` (a number greater than 0; the defaults are 4 for `fare_outlier_conditional` and 3.5 for `fare_outlier_univariate`):
+
+```toml
+[checks.fare_outlier_conditional.params]
+k = 4.0                    # both |robust z| must exceed k; the report shows the effective k
+```
+
+Unknown keys and unknown check names are errors (exit 2), so a typo can't silently do nothing. So is a param name the check doesn't know or a param that is not greater than 0, and so is a config that leaves no check enabled, and `enabled = false` for `cast_failures`. The effective thresholds and severities are recorded in the report. A `max_failed_rate` on a dataset check (for example `duplicate_rows`) replaces its threshold and re-judges it against its measured rate.
 
 ## Report
 
@@ -295,7 +319,7 @@ src/rideshare_data_pipeline/
   __init__.py         __version__, read from the package metadata
   __main__.py         python -m rideshare_data_pipeline
   cli.py              the rideshare-qc command (argparse, `run` subcommand): summary, check lines, reports, Parquet output, exit codes
-  config.py           QCConfig and CheckOverride, TOML loading (tomllib), applying overrides to rules and results
+  config.py           QCConfig and CheckOverride (with per-check params), TOML loading (tomllib), applying overrides to rules and results
   dedupe.py           the dedupe policy: supersede_flags (is_superseded, is_cross_panelist_copy), deduplicated
   parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag, currency reason and flag, distance, duration, unit, product family
   sender.py           sender_country and the known-sender patterns (from_domain is the full sender address)
@@ -317,6 +341,7 @@ src/rideshare_data_pipeline/
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
     parsing.py        description_parse_coverage (PC1)
+    outliers.py       robust_z, fare_outlier_conditional (O4) and fare_outlier_univariate (O5), sharing one scoring pass
     currency.py       currency_suspect_rows (CUR1), merchant_sender_consistent (V1), unknown_sender (V3)
     structural.py     S1/S3 results from the file facts, row_count_band, C1 required_fields and
                       S6 id_formats (RowRules), C2 ride_completeness, S4/S5 (one shared
@@ -325,7 +350,7 @@ tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
   test_schema.py  test_io.py  test_cache.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
-  test_checks_arithmetic.py  test_checks_temporal.py  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py
+  test_checks_arithmetic.py  test_checks_temporal.py  test_checks_outliers.py  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```
 
@@ -349,7 +374,7 @@ Planned work is tracked in the GitHub issues:
 - Data hygiene and the input contract: guarding against committing data (#6), schema, header and encoding validation (#8), hardened extraction and a Parquet cache (#17).
 - Check framework and reporting: the CheckResult model and runner (#9), a synthetic fixture generator (#10), and the JSON and Markdown report with exit codes and TOML thresholds (#11, done).
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
-- Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19, done), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
+- Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19, done), fare outliers (#20, done), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22), privacy normalization (#30), and a stakeholder summary (#31).
 - Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).
 

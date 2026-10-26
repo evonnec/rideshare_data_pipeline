@@ -17,6 +17,7 @@ from rideshare_data_pipeline.checks import (
     arithmetic,
     currency,
     kinds,
+    outliers,
     parsing,
     structural,
     temporal,
@@ -51,8 +52,15 @@ def default_rules() -> tuple[RowRule, ...]:
     )
 
 
-def default_dataset_checks() -> tuple[DatasetCheck, ...]:
-    """Return every registered dataset check."""
+def default_dataset_checks(
+    params: Mapping[str, Mapping[str, float]] | None = None,
+    sample_limit: int = SAMPLE_LIMIT,
+) -> tuple[DatasetCheck, ...]:
+    """Return every registered dataset check.
+
+    `params` (``{check name: {param: value}}``, from ``QCConfig.check_params``) and
+    `sample_limit` are threaded into the checks that take them (the outlier checks).
+    """
     return (
         *structural.dataset_checks(),
         *arithmetic.dataset_checks(),
@@ -61,6 +69,7 @@ def default_dataset_checks() -> tuple[DatasetCheck, ...]:
         *parsing.dataset_checks(),
         *currency.dataset_checks(),
         *temporal.dataset_checks(),
+        *outliers.dataset_checks(params, sample_limit),
     )
 
 
