@@ -18,12 +18,15 @@ lazy import polars as pl
 
 from rideshare_data_pipeline.checks.model import (
     KEY_COLS,
+    POSITION,
     SAMPLE_LIMIT,
     CheckResult,
     DatasetCheck,
+    FlaggedCheck,
     Frame,
     RowRule,
     Severity,
+    rows_at,
 )
 from rideshare_data_pipeline.dedupe import (
     KEY,
@@ -242,33 +245,25 @@ def cross_panelist_check(lf: pl.LazyFrame) -> CheckResult:
     )
 
 
-def near_duplicate_rides_check(lf: pl.LazyFrame) -> CheckResult:
-    """U4 (warn): ride rows alike but for the order number (a re-sent receipt?).
+def _rides(lf: pl.LazyFrame) -> pl.LazyFrame:
+    return lf.filter(pl.col("receipt_kind").cast(pl.String) == "ride")
 
-    Among rides, rows are grouped by user, merchant, order date, total and
-    description. A group counts when it has more than one row and either more than
-    one distinct order number or a null one (the same order number twice is U2's).
-    ``n_failed`` is the excess rows (group size - 1, summed); ``n_evaluated`` the
-    rides. ``details``: ``groups`` and ``rows`` (all rows in those groups). Only
-    flagged: the dedupe never acts on it.
-    """
-    rides = lf.filter(pl.col("receipt_kind").cast(pl.String) == "ride")
+
+def _near_candidates(rides: pl.LazyFrame) -> pl.LazyFrame:
+    """Rides whose (user, merchant, order date, total, description) repeats."""
     near = rides.with_columns(pl.col("order_time").dt.date().alias("order_date"))
-    key = pl.struct(_NEAR_KEY)
-    candidates, n_rides = pl.collect_all(
-        [
-            near.filter(
-                key.is_duplicated()
-                & pl.col("user_id").is_not_null()
-                & pl.col("merchant_name").is_not_null()
-                & pl.col("order_date").is_not_null()
-                & pl.col("order_total_amount").is_not_null()
-            ).select(*_NEAR_KEY, *(c for c in KEY_COLS if c not in _NEAR_KEY)),
-            rides.select(pl.len()),
-        ],
-        engine="streaming",
+    return near.filter(
+        pl.struct(_NEAR_KEY).is_duplicated()
+        & pl.col("user_id").is_not_null()
+        & pl.col("merchant_name").is_not_null()
+        & pl.col("order_date").is_not_null()
+        & pl.col("order_total_amount").is_not_null()
     )
-    groups = (
+
+
+def _near_groups(candidates: Frame) -> Frame:
+    """The candidate groups that count: other order numbers, or a null one."""
+    return (
         candidates.group_by(_NEAR_KEY)
         .agg(
             pl.len().alias("n"),
@@ -277,13 +272,59 @@ def near_duplicate_rides_check(lf: pl.LazyFrame) -> CheckResult:
         )
         .filter((pl.col("distinct") > 1) | pl.col("has_null"))
     )
+
+
+def duplicate_receipts_flag(_lf: pl.LazyFrame) -> pl.Expr:
+    """Every row of a repeated (merchant_name, order_number) key, as U2 counts."""
+    return in_repeated_key()
+
+
+def cross_panelist_flag(_lf: pl.LazyFrame) -> pl.Expr:
+    """Rows of a key shared by more than one user_id (``is_cross_panelist_copy``)."""
+    return pl.col("is_cross_panelist_copy")
+
+
+def _near_scan(lf: pl.LazyFrame) -> tuple[CheckResult, Frame]:
+    """U4's result, and the positions (``POSITION``) of the rows it flags.
+
+    The flagged rows are the excess rows: the first row of a near-duplicate group,
+    in file order, is not flagged and every later row is, so they number U4's
+    ``n_failed`` (group size - 1, summed). A reader filtering on the flag keeps one
+    ride of each group.
+
+    U4 (warn): ride rows alike but for the order number (a re-sent receipt?).
+
+    Among rides, rows are grouped by user, merchant, order date, total and
+    description. A group counts when it has more than one row and either more than
+    one distinct order number or a null one (the same order number twice is U2's).
+    ``n_failed`` is the excess rows (group size - 1, summed); ``n_evaluated`` the
+    rides. ``details``: ``groups`` and ``rows`` (all rows in those groups). Only
+    flagged: the dedupe never acts on it.
+    """
+    rides = _rides(lf.with_row_index(POSITION))
+    candidates, n_rides = pl.collect_all(
+        [
+            _near_candidates(rides).select(
+                POSITION, *_NEAR_KEY, *(c for c in KEY_COLS if c not in _NEAR_KEY)
+            ),
+            rides.select(pl.len()),
+        ],
+        engine="streaming",
+    )
+    groups = _near_groups(candidates)
     failing = candidates.join(
         groups.select(_NEAR_KEY), on=_NEAR_KEY, how="semi", nulls_equal=True
     )
     sample = failing.sort([*_NEAR_KEY, "email_time"], nulls_last=True).head(
         SAMPLE_LIMIT
     )
-    return _result(
+    later = (
+        failing.select(POSITION, *_NEAR_KEY)
+        .sort(POSITION)
+        .filter(pl.int_range(pl.len()).over(_NEAR_KEY) > 0)
+        .select(POSITION)
+    )
+    result = _result(
         "near_duplicate_rides",
         "U4",
         Severity.WARN,
@@ -296,13 +337,43 @@ def near_duplicate_rides_check(lf: pl.LazyFrame) -> CheckResult:
         sample.select(KEY_COLS),
         {"groups": groups.height, "rows": failing.height},
     )
+    return result, later
+
+
+def near_duplicate_rides_check(lf: pl.LazyFrame) -> CheckResult:
+    """U4 (warn); see ``_near_scan`` for the rule and ``near_duplicate_rides``."""
+    return _near_scan(lf)[0]
+
+
+def near_duplicate_rides() -> FlaggedCheck:
+    """U4 with its row flag, which reuses the check's scan (one pass for both).
+
+    Call the flag with the frame the check ran on; the pair remembers the last
+    frame it was given, by identity (as ``outliers.outlier_checks`` does).
+    """
+    last: list[tuple[pl.LazyFrame, CheckResult, Frame]] = []
+
+    def scan(lf: pl.LazyFrame) -> tuple[CheckResult, Frame]:
+        if not (last and last[0][0] is lf):
+            last[:] = [(lf, *_near_scan(lf))]
+        return last[0][1], last[0][2]
+
+    return FlaggedCheck(
+        "near_duplicate_rides",
+        lambda lf: scan(lf)[0],
+        lambda lf: rows_at(scan(lf)[1][POSITION]),
+    )
 
 
 def dataset_checks() -> tuple[DatasetCheck, ...]:
     """The uniqueness checks that need the whole dataset, for the registry."""
     return (
-        duplicate_receipts_check,
+        FlaggedCheck(
+            "duplicate_receipts", duplicate_receipts_check, duplicate_receipts_flag
+        ),
         dedupe_key_unique_check,
-        cross_panelist_check,
-        near_duplicate_rides_check,
+        FlaggedCheck(
+            "cross_panelist_duplicates", cross_panelist_check, cross_panelist_flag
+        ),
+        near_duplicate_rides(),
     )

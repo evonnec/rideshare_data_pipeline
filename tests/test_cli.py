@@ -23,6 +23,8 @@ from synthetic import (
 
 from rideshare_data_pipeline import __version__
 from rideshare_data_pipeline.cli import main
+from rideshare_data_pipeline.config import KNOWN_CHECKS
+from rideshare_data_pipeline.curated import curated_schema
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS, csv_schema
 
 
@@ -188,16 +190,20 @@ def test_csv_end_to_end(
     assert found["all-null columns"] == f"5 ({', '.join(ALL_NULL)})"
     assert found["constant columns"] == f"4 ({', '.join(CONSTANT)})"
     assert found["duplicate rows"] == "0"
-    assert found["wrote"] == f"{out / 'sample.parquet'} (33 columns)"
+    contract = curated_schema(KNOWN_CHECKS)
+    assert (
+        found["wrote"] == f"{out / 'sample.curated.parquet'} ({len(contract)} columns)"
+    )
 
-    # All columns are kept, all-null and constant ones included, with their dtypes.
-    written = pl.read_parquet(out / "sample.parquet")
-    assert written.schema == csv_schema()
+    # Every input column is kept, all-null and constant ones included, with its dtype.
+    written = pl.read_parquet(out / "sample.curated.parquet")
+    assert written.schema == contract
+    assert {c: written.schema[c] for c in EXPECTED_COLUMNS} == dict(csv_schema())
     assert written.height == 3
     assert sorted(p.name for p in out.iterdir()) == [
         "report.json",
         "report.md",
-        "sample.parquet",
+        "sample.curated.parquet",
     ]
 
 
@@ -221,7 +227,9 @@ def test_archive_end_to_end(
     assert main(["run", "--input", str(archive), "--out", str(out)]) == 0
 
     assert summary(capsys.readouterr().out)["rows"] == "3"
-    assert pl.read_parquet(out / "Data.parquet").schema == csv_schema()
+    assert pl.read_parquet(out / "Data.curated.parquet").schema == curated_schema(
+        KNOWN_CHECKS
+    )
     # The extraction directory is gone, and nothing was written to the cwd.
     assert list(private_tmp.iterdir()) == []
     assert list(empty_cwd.iterdir()) == []
@@ -233,7 +241,7 @@ def test_relative_paths_write_only_to_the_named_out_dir(
     (empty_cwd / "in.csv").write_bytes(synthetic_csv.read_bytes())
     assert main(["run", "--input", "in.csv", "--out", "reports"]) == 0
     assert sorted(p.name for p in (empty_cwd / "reports").iterdir()) == [
-        "in.parquet",
+        "in.curated.parquet",
         "report.json",
         "report.md",
     ]
@@ -249,7 +257,7 @@ def test_header_only_csv_writes_an_empty_parquet(
     assert found["rows"] == "0"
     assert found["all-null columns"] == "0"
     assert found["constant columns"] == "0"
-    assert pl.read_parquet(tmp_path / "out" / "header.parquet").height == 0
+    assert pl.read_parquet(tmp_path / "out" / "header.curated.parquet").height == 0
 
 
 def test_header_only_csv_fails_the_row_count_band_unless_min_rows_is_0(
@@ -282,7 +290,7 @@ def test_duplicate_rows_exit_1_and_keep_every_row(
     out = tmp_path / "out"
     assert main(["run", "--input", str(path), "--out", str(out)]) == 1
     assert summary(capsys.readouterr().out)["duplicate rows"] == "1"
-    assert pl.read_parquet(out / "dups.parquet").height == 4
+    assert pl.read_parquet(out / "dups.curated.parquet").height == 4
 
 
 # --- dropping columns only on request ----------------------------------------------
@@ -292,9 +300,12 @@ def test_drop_columns(synthetic_csv: Path, tmp_path: Path) -> None:
     out = tmp_path / "out"
     argv = ["--input", str(synthetic_csv), "--out", str(out)]
     assert main(["run", *argv, "--drop-columns", "order_points, SKU,file_id"]) == 0
-    columns = list(pl.read_parquet_schema(out / "sample.parquet"))
+    columns = list(pl.read_parquet_schema(out / "sample.curated.parquet"))
     dropped = {"order_points", "SKU", "file_id"}
-    assert columns == [c for c in EXPECTED_COLUMNS if c not in dropped]
+    # The input columns go; the derived and flag columns are never dropped.
+    assert columns == list(curated_schema(KNOWN_CHECKS, dropped))
+    assert not dropped & set(columns)
+    assert {"receipt_kind", "is_superseded", "qc_flags", "qc_error"} <= set(columns)
 
 
 def test_drop_columns_rejects_unknown_names(

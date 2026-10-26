@@ -30,6 +30,7 @@ SAMPLE_LIMIT = 20
 # dataclasses below can name polars types and importing this module stays free.
 type Frame = pl.DataFrame
 type Expr = pl.Expr
+type Lazy = pl.LazyFrame
 
 
 class Severity(StrEnum):
@@ -103,3 +104,33 @@ class RowRule:
 
 type DatasetCheck = Callable[[pl.LazyFrame], CheckResult]
 """A check on the dataset as a whole: LazyFrame in, CheckResult out."""
+
+POSITION = "_row"
+"""The temporary column the curated plan adds: each row's 0-based position in the
+frame. Row-flag providers that find their rows eagerly name them by it."""
+
+
+def rows_at(positions: pl.Series) -> pl.Expr:
+    """True on the rows at these positions (the ``POSITION`` column); False if none."""
+    if positions.len() == 0:
+        return pl.lit(False)
+    return pl.col(POSITION).is_in(positions.implode())
+
+
+@dataclass(frozen=True, slots=True)
+class FlaggedCheck:
+    """A dataset check that can also say which rows it counted as failed.
+
+    Calling it runs the check, so it is a DatasetCheck. ``row_flag(lf)`` returns a
+    boolean expression, True on the rows the check counts in ``n_failed`` (so the
+    flag column sums to it). It takes the same frame the check ran on (a check that
+    caches work by frame identity, like the outlier scores, then reuses it) and
+    reads the ``POSITION`` column of the curated plan if it needs row positions.
+    """
+
+    name: str
+    check: DatasetCheck
+    row_flag: Callable[[Lazy], Expr]
+
+    def __call__(self, lf: pl.LazyFrame) -> CheckResult:
+        return self.check(lf)

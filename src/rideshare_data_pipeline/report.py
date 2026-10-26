@@ -74,7 +74,10 @@ class RunInfo:
     """Empty lines of the CSV that were read; dropped, not an error."""
 
     parquet_name: str | None = None
-    """File name of the Parquet written into the output directory, if any."""
+    """File name of the curated Parquet written into the output directory, if any.
+    It has `rows` rows (none is dropped) and `curated_columns` columns."""
+
+    curated_columns: int = 0
 
 
 def gates(result: CheckResult, fail_on: Severity) -> bool:
@@ -250,6 +253,15 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
         "exit_code": code,
         "outputs": {
             "parquet": run.parquet_name,
+            "curated": (
+                None
+                if run.parquet_name is None
+                else {
+                    "name": run.parquet_name,
+                    "rows": run.rows,
+                    "columns": run.curated_columns,
+                }
+            ),
             "samples": [n for r in results if (n := sample_name(r)) is not None],
         },
     }
@@ -887,6 +899,26 @@ def _sample_caption(result: CheckResult, shown: int) -> str:
     return f"{shown} of {result.n_failed:,} failing rows"
 
 
+def _curated_section(run: RunInfo) -> list[str]:
+    if run.parquet_name is None:
+        return ["No curated Parquet was written.", ""]
+    return [
+        (
+            f"[{run.parquet_name}]({run.parquet_name}): {run.rows:,} rows (none "
+            f"dropped; superseded rows carry `is_superseded`) · "
+            f"{run.curated_columns} columns."
+        ),
+        "",
+        (
+            "Each `qc_<check>` column is True on the rows that fail that check, and "
+            "its count is the check's `failed` figure in the table above; "
+            "`qc_error` and `qc_warn` combine them by severity, and `qc_flags` "
+            "lists the names."
+        ),
+        "",
+    ]
+
+
 def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> str:
     """Render the report as Markdown."""
     s = summarize(results)
@@ -959,6 +991,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
             ],
         )
         out.append("")
+    out += ["## Curated dataset", ""]
+    out += _curated_section(run)
     out += ["## Samples", ""]
     failing = [r for r in _sorted(results) if sample_name(r) and r.sample is not None]
     if not failing:

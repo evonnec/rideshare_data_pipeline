@@ -154,7 +154,7 @@ def test_run_writes_reports_and_samples(
     assert run_cli(full_synthetic_csv, out) == 1  # A1 is an error and fails
     assert (out / "report.json").is_file()
     assert (out / "report.md").is_file()
-    assert (out / "synthetic.parquet").is_file()
+    assert (out / "synthetic.curated.parquet").is_file()
     assert sorted(p.name for p in (out / "samples").iterdir()) == [
         "category_mismatch.parquet",
         "cross_panelist_duplicates.parquet",
@@ -235,7 +235,7 @@ def test_report_json_content_matches_the_manifest(
     assert run["rows"] == 294
     assert (
         run["panelists"]
-        == pl.read_parquet(out / "synthetic.parquet")["user_id"].n_unique()
+        == pl.read_parquet(out / "synthetic.curated.parquet")["user_id"].n_unique()
     )
     assert run["window"]["start"] < run["window"]["end"]
     a1 = checks_by_name(report)["non_negative_total"]

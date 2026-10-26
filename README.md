@@ -34,10 +34,10 @@ rideshare-qc --help | --version
 ```
 
 - `--input PATH`: the CSV, or a `.tar.bz2`, `.tar.gz`, `.tar.xz`, `.tar` or `.zip` archive that holds exactly one CSV (macOS `._*` sidecar files are ignored; see [Archives](#archives)).
-- `--out DIR`: where everything is written (created if missing): `report.json`, `report.md`, `samples/<check>.parquet` (one per failed check that has sample rows), and `<input stem>.parquet` (zstd; the curated Parquet with per-row flags is planned in #22). An input with no stem (a file named just `.csv`) writes `input.parquet`, never a hidden file. See [Outputs](#outputs).
+- `--out DIR`: where everything is written (created if missing): `report.json`, `report.md`, `samples/<check>.parquet` (one per failed check that has sample rows), and `<input stem>.curated.parquet` (zstd: every input row, the typed input columns, the derived columns and per-row QC flags; see [Curated dataset](#curated-dataset)). An input with no stem (a file named just `.csv`) writes `input.curated.parquet`, never a hidden file. See [Outputs](#outputs).
 - `--config FILE`: a TOML file with thresholds, severities and on/off switches (see [Configuration](#configuration)).
 - `--fail-on {error,warn}`: the lowest severity whose failure exits 1. Overrides the config's `fail_on`; the default is `error`.
-- `--drop-columns A,B`: columns to leave out of the Parquet file. By default every column and every row is kept. The checks only report, and nothing is dropped unless you ask.
+- `--drop-columns A,B`: input columns to leave out of the curated Parquet. By default every column and every row is kept; nothing is dropped unless you ask, and the derived and flag columns are never dropped. The checks run on the whole frame first, so a dropped column's flags are still correct.
 - `--cache-dir DIR`: keep (and reuse) a typed Parquet copy of the input in DIR. Also read from the environment variable `RIDESHARE_QC_CACHE` when the flag is absent; with neither, no cache is used. See [Cache](#cache).
 - `--refresh-cache`: rebuild the cache entry for this input even if a valid one exists (needs a cache directory).
 
@@ -49,7 +49,7 @@ columns:          33
 all-null columns: 5 (order_points, order_shipping, SKU, item_id, file_id)
 constant columns: 4 (order_total_qty, item_quantity, digital_transaction, product_category)
 duplicate rows:   0
-wrote:            reports/receipts.parquet (33 columns)
+wrote:            reports/receipts.curated.parquet (77 columns)
 
 error  PASS  header_valid                  0/1            0.0000%
 error  PASS  utf8_valid                    0/1            0.0000%
@@ -73,7 +73,51 @@ A row rule passes while its failure rate is at most its threshold (`max_failed_r
 
 ## Outputs
 
-Every file the run writes (`report.json`, `report.md`, each `samples/<check>.parquet` and `<input stem>.parquet`) is written to a temporary name beside its destination and then renamed into place, so a file is either the previous one or the new one and an interrupted run never leaves a partial file. The run deletes nothing in `--out` except the previous `samples/*.parquet`: **`--out` may hold outputs of other runs** (for example the Parquet of another input), and the report's `outputs` object (`{"parquet": "<name>", "samples": [...]}`) lists the files that belong to this run, so a stale file is easy to tell. Use a fresh directory per input if you want a clean folder.
+Every file the run writes (`report.json`, `report.md`, each `samples/<check>.parquet` and `<input stem>.curated.parquet`) is written to a temporary name beside its destination and then renamed into place, so a file is either the previous one or the new one and an interrupted run never leaves a partial file. The run deletes nothing in `--out` except the previous `samples/*.parquet`: **`--out` may hold outputs of other runs** (for example the Parquet of another input), and the report's `outputs` object (`{"parquet": "<name>", "curated": {"name", "rows", "columns"}, "samples": [...]}`) lists the files that belong to this run, so a stale file is easy to tell. Use a fresh directory per input if you want a clean folder.
+
+## Curated dataset
+
+`<input stem>.curated.parquet` (zstd) is the dataset to work from: a typed, strict superset of the delivered file. **Every input row is kept**; the dedupe policy is the `is_superseded` flag, not a deletion, so there is no `--no-dedupe` option: consumers filter on flags. Columns are never dropped silently (`--drop-columns` names input columns to leave out). It is written by a lazy plan (one `with_columns`, then `sink_parquet`), so the typed frame is not copied to write it. The contract is `curated.curated_schema(enabled_checks)`, asserted against the written file in the tests.
+
+Columns, in this order:
+
+| Group | Columns | Type | Meaning |
+|---|---|---|---|
+| Input | the 33 columns of the file, in file order | as `schema.py` casts them | the typed values; all-null and constant columns are kept and only reported |
+| Derived | `receipt_kind` | Enum | the receipt kind (see [Receipt kinds](#receipt-kinds)) |
+| | `subject_profile` | String | `business`, `personal` or null, from the subject's leading tag |
+| | `subject_unclassified` | Boolean | no kind rule matched, so `receipt_kind` defaulted to `ride` |
+| | `is_rider_spend` | Boolean | the kind is rider spend |
+| | `sender_country` | String | country of the sender, or null |
+| | `currency_reason` | Enum | why the amount may not be USD (`non_us_sender`, `km_unit`, `foreign_language`), else null |
+| | `currency_suspect` | Boolean | `currency_reason` is set |
+| | `foreign_subject` | Boolean | Spanish or Portuguese subject (an info tag; not a reason on its own) |
+| | `distance_mi`, `distance_unit`, `duration_s`, `product_family` | Float64, Enum, Int64, Enum | the trip, parsed from the description (see [Description parsing](#description-parsing)) |
+| Dedupe | `is_superseded`, `is_cross_panelist_copy` | Boolean | a later version of the receipt supersedes this row; the key was seen under more than one `user_id` (see [Duplicates and dedupe](#duplicates-and-dedupe)) |
+| Spend | `is_usd_rider_spend` | Boolean | the row counts toward clean USD rider spend: rider spend, not currency-suspect, not superseded, with an amount (exactly `money.usd_rides`) |
+| Check flags | `qc_<check name>` | Boolean | **True means the row fails that check** (never null), one column per row-flagged check |
+| Severity | `qc_error`, `qc_warn` | Boolean | the row fails at least one error- (warn-) severity flag, severities as configured |
+| Names | `qc_flags` | List(String) | the names of the checks the row fails, in report order; an empty list, never null, on a clean row |
+
+**Which checks have a flag.** Every row rule (its predicate, ANDed with `applies_to`, a null counting as not failed: the runner's own rule, so the column sums to the check's `n_failed`), plus the dataset checks that can point at rows: `duplicate_rows` (every exact copy after the first), `duplicate_receipts` (every row of a repeated key, as U2 counts), `cross_panelist_duplicates` (= `is_cross_panelist_copy`), `near_duplicate_rides` (the excess rows: the first ride of a group in file order is not flagged, every later one is, so the column sums to U4's `n_failed`), `currency_suspect_rows` (= `currency_suspect`), `description_parse_coverage` (the unparsed rows of PC1's population) and `fare_outlier_conditional` (O4's rows, from the same cached scores). Dataset-level findings have no column: `header_valid`, `utf8_valid`, `cast_failures`, `row_count_band`, `all_null_columns`, `constant_columns`, `receipt_kinds`, `unclassified_subject_templates`, `identity_share`, `date_only_order_time`, `fare_outlier_univariate` (info), `dedupe_key_unique` and `ride_completeness`. A check that is disabled in the config has no column. The invariant `sum(qc_<name>) == n_failed` is tested for every flag.
+
+**Filtering.**
+
+```python
+import polars as pl
+
+df = pl.scan_parquet("receipts.curated.parquet")
+# clean USD rider spend
+spend = df.filter(pl.col("is_usd_rider_spend"))
+# the warn-severity review queue
+review = df.filter(pl.col("qc_warn"))
+# no error or warn flag
+clean = df.filter(~pl.col("qc_error") & ~pl.col("qc_warn"))
+# one check by name
+outliers = df.filter(pl.col("qc_flags").list.contains("fare_outlier_conditional"))
+```
+
+`is_usd_rider_spend` already excludes superseded duplicates, so summing `order_total_amount` over its rows gives the report's clean USD rider spend exactly.
 
 ## Archives
 
@@ -112,7 +156,7 @@ The file mixes receipt types that are not rider spend, all tagged with the categ
 
 **Rider spend.** `is_rider_spend` is true for `ride`, `tip_update`, `fare_correction` and `cancel_noshow`. Other kinds stay in the data, flagged, and are left out of spend. A cancellation fee counts as spend under its own kind. A tip update or a fare correction supersedes the receipt of the ride it amends; the dedupe flags that original (see Duplicates and dedupe). Currency gating narrows this to USD spend (see [Currency](#currency-and-the-usd-gate)).
 
-The derived columns (`receipt_kind`, `subject_profile`, `subject_unclassified`, `is_rider_spend`, `sender_country`, `currency_reason`, `currency_suspect`, `foreign_subject`, and the trip columns) are computed once per run for the checks. They are not in the output Parquet yet; the curated dataset with flags is #22.
+The derived columns (`receipt_kind`, `subject_profile`, `subject_unclassified`, `is_rider_spend`, `sender_country`, `currency_reason`, `currency_suspect`, `foreign_subject`, and the trip columns) are computed once per run for the checks. They are computed once per run for the checks and written to the [curated dataset](#curated-dataset).
 
 Checks added: `receipt_kinds` (K1, info: the kind counts and the merchant x kind matrix, shown in the report), `category_mismatch` (V2, warn: category `Travel` on a food order, freight, rental or driver earnings) and `unclassified_subject_templates` (K2, info). `non_negative_total` (A1) now applies to rider-spend receipts only: a refund on a bike or pass receipt isn't a rider-spend error.
 
@@ -137,7 +181,7 @@ Input errors include a missing or unsupported file, an archive that can't be ext
 
 The legacy whole-row duplicate check could never fire: `checksum` is unique per row and the ingestion metadata differs between versions of a receipt. The vendor upserts updated receipts and the same receipt can reach two panelists, so duplicates are found on the order key `(merchant_name, order_number)`, over rows where both are non-null (a null is not a key: recurring pass charges have no order number and are legitimate).
 
-**Dedupe policy** (`dedupe.py`). `supersede_flags` adds a boolean `is_superseded`; **rows are never dropped**, consumers filter on the flag (`deduplicated` is that view, used for spend metrics from #15 on). Within a key group one row wins and the rest are superseded. The winner is the first of: a `tip_update` or `fare_correction` (kind priority beats time, so a tip update supersedes its ride even when the ride's email is later); the latest `email_time`; the latest `update_time`; the greatest `checksum`. Rows without a key are never superseded, and dedupe is idempotent. The flag is computed once per run for the checks and is not in the output Parquet (the curated dataset with flags is #22).
+**Dedupe policy** (`dedupe.py`). `supersede_flags` adds a boolean `is_superseded`; **rows are never dropped**, consumers filter on the flag (`deduplicated` is that view, used for spend metrics from #15 on). Within a key group one row wins and the rest are superseded. The winner is the first of: a `tip_update` or `fare_correction` (kind priority beats time, so a tip update supersedes its ride even when the ride's email is later); the latest `email_time`; the latest `update_time`; the greatest `checksum`. Rows without a key are never superseded, and dedupe is idempotent. The flag is computed once per run for the checks and is a column of the [curated dataset](#curated-dataset).
 
 **Cross-panelist copies.** The same receipt can reach two panelists' mailboxes. For panel totals the dedupe keeps one row per key, so the losing copy is superseded. `supersede_flags` also adds `is_cross_panelist_copy`, true for every row of a key group with more than one distinct non-null `user_id` (U3's `n_failed` is the number of rows with it). It is derived, not an input column, so the structural checks ignore it. A per-panelist statistic (checks from #26 on: a panelist's spend, trips or tenure) is about what each panelist received, so it should take the non-superseded rows **plus** the superseded rows that have this flag, which attributes a shared receipt to both panelists; panel-level totals keep using the deduplicated rows only.
 
@@ -305,7 +349,7 @@ Unknown keys and unknown check names are errors (exit 2), so a typo can't silent
            micromobility (a sub-line of non_rider_spend), suspect_rider_spend: {rows, amount}, note}  (optional),
  "checks": [{name, check_id, category, severity, passed, metric, threshold, n_failed, n_evaluated,
              predicate, details, sample_file (relative path or null)}],
- "outputs": {parquet (file name), samples [relative paths]}  (optional: the files of this run),
+ "outputs": {parquet (file name of the curated Parquet), curated ({name, rows, columns} or null), samples [relative paths]}  (the files of this run),
  "exit_code": 0 | 1}   (2 and 3 are never written: those runs have no report)
 ```
 
@@ -322,7 +366,7 @@ All numbers are finite, so the file is strict JSON.
 | `duration_s` | Int64 | duration in seconds |
 | `product_family` | Enum | `uberx`, `lyft_standard`, `shared` (pool, shared, line), `express_pool`, `xl`, `black_lux` (black, lux, SUV, premier), `comfort` (select, plus, comfort), `vip`, `other` |
 
-Templates: Lyft `Lyft fare (1.63mi, 12m 23s)` (also `45s` and `1h 2m 3s`) and `Base fare ... 7.06 mi` lines; Uber `UberX 9.93 mi | 32 min` (also `| 1 h 22 min`, `km`); older Uber `2.00 miles   00:15:14 Trip time   uberX Car`. The family comes from the product label, first match in this order: express, shared, vip, black/lux, xl, comfort, uberx, lyft; a trip with none (a Lyft `Base fare` line) is `other`. Like the other derived columns they are computed once per run and are not in the output Parquet (#22).
+Templates: Lyft `Lyft fare (1.63mi, 12m 23s)` (also `45s` and `1h 2m 3s`) and `Base fare ... 7.06 mi` lines; Uber `UberX 9.93 mi | 32 min` (also `| 1 h 22 min`, `km`); older Uber `2.00 miles   00:15:14 Trip time   uberX Car`. The family comes from the product label, first match in this order: express, shared, vip, black/lux, xl, comfort, uberx, lyft; a trip with none (a Lyft `Base fare` line) is `other`. Like the other derived columns they are computed once per run and are columns of the [curated dataset](#curated-dataset).
 
 `description_parse_coverage` (PC1, warn) takes the ride and tip-update rows that are not superseded and passes while every merchant parses at least 98% of them (distance and duration both read). The population leaves out the `Increase Tip` / `Tip Increase` stub lines. Its metric is the worst merchant unparsed rate (`details.metric_label`; not `n_failed / n_evaluated`), and its details hold per-merchant `rows`, `parsed` and `coverage`, the unit counts, the family counts by merchant and the ten most common unparsed shapes (digits shown as `#`, never the text). The report's "Description parsing" section shows them.
 
@@ -332,8 +376,9 @@ Templates: Lyft `Lyft fare (1.63mi, 12m 23s)` (also `45s` and `1h 2m 3s`) and `B
 src/rideshare_data_pipeline/
   __init__.py         __version__, read from the package metadata
   __main__.py         python -m rideshare_data_pipeline
-  cli.py              the rideshare-qc command (argparse, `run` subcommand): summary, check lines, reports, Parquet output, exit codes
+  cli.py              the rideshare-qc command (argparse, `run` subcommand): summary, check lines, reports, curated Parquet output, exit codes
   config.py           QCConfig and CheckOverride (with per-check params), TOML loading (tomllib), applying overrides to rules and results
+  curated.py          the curated dataset: curated_schema (the column contract), row_flags, curated_plan, write_curated (sink_parquet)
   dedupe.py           the dedupe policy: supersede_flags (is_superseded, is_cross_panelist_copy), deduplicated
   parse.py            derived columns as pl.Expr factories: receipt kind, subject profile, rider-spend flag, currency reason and flag, distance, duration, unit, product family
   sender.py           sender_country and the known-sender patterns (from_domain is the full sender address)
@@ -349,7 +394,7 @@ src/rideshare_data_pipeline/
     __init__.py       the registry (default_rules, default_dataset_checks) and run_checks:
                       every RowRule is counted in one lazy select, then the samples of
                       the failing rules are collected in one batch
-    model.py          Severity, CheckResult, RowRule, DatasetCheck
+    model.py          Severity, CheckResult, RowRule, DatasetCheck, FlaggedCheck (a dataset check with a per-row flag)
     arithmetic.py     row rules A1-A6, dataset check A7
     temporal.py       row rules T1-T5 (timestamp order, local-vs-UTC tolerance), dataset check T6 (date-only order_time)
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
@@ -365,7 +410,7 @@ tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
   test_schema.py  test_io.py  test_cache.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
-  test_checks_arithmetic.py  test_checks_temporal.py  test_checks_outliers.py  test_checks_plausibility.py  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py
+  test_checks_arithmetic.py  test_checks_temporal.py  test_checks_outliers.py  test_checks_plausibility.py  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py  test_curated.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```
 
@@ -390,7 +435,7 @@ Planned work is tracked in the GitHub issues:
 - Check framework and reporting: the CheckResult model and runner (#9), a synthetic fixture generator (#10), and the JSON and Markdown report with exit codes and TOML thresholds (#11, done).
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
 - Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19, done), fare outliers (#20, done), trip plausibility (#21, done), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
-- Outputs: a curated Parquet dataset with per-row QC flags (#22), privacy normalization (#30), and a stakeholder summary (#31).
+- Outputs: a curated Parquet dataset with per-row QC flags (#22, done), privacy normalization (#30), and a stakeholder summary (#31).
 - Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).
 
 ## License

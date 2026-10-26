@@ -382,5 +382,6 @@ def test_pc1_empty_population_passes() -> None:
 
 
 def test_pc1_is_registered_and_known() -> None:
-    assert description_parse_coverage_check in default_dataset_checks()
+    names = [getattr(c, "name", None) for c in default_dataset_checks()]
+    assert "description_parse_coverage" in names
     assert "description_parse_coverage" in KNOWN_CHECKS

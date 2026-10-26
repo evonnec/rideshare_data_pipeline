@@ -27,6 +27,8 @@ def test_cli_on_real_data(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
 
     stdout = capsys.readouterr().out
     assert "rows:" in stdout
-    written = pl.scan_parquet(tmp_path / f"{input_stem(DATA)}.parquet")
-    assert written.collect_schema().names() == list(EXPECTED_COLUMNS)
+    written = pl.scan_parquet(tmp_path / f"{input_stem(DATA)}.curated.parquet")
+    names = written.collect_schema().names()
+    assert names[: len(EXPECTED_COLUMNS)] == list(EXPECTED_COLUMNS)
+    assert names[-1] == "qc_flags"
     assert written.select(pl.len()).collect().item() > 0

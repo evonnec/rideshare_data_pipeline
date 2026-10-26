@@ -32,12 +32,17 @@ from rideshare_data_pipeline.config import (
     configure_rules,
     load_config,
 )
+from rideshare_data_pipeline.curated import (
+    curated_plan,
+    flag_table,
+    row_flags,
+    write_curated,
+)
 from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.io import (
     FileFacts,
     InputError,
     input_stem,
-    write_parquet,
 )
 from rideshare_data_pipeline.parse import with_derived
 from rideshare_data_pipeline.report import (
@@ -67,8 +72,11 @@ _RUN_DESCRIPTION = """\
 Read the rideshare e-receipt CSV (or an archive holding it): check its UTF-8
 encoding and header, cast the columns to their types, run the QC checks and write
 into DIR: report.json, report.md, samples/<check>.parquet for each failed check,
-and <input stem>.parquet with every column and row (unless --drop-columns names
-columns to leave out). Blank lines are dropped and counted in the report.
+and <input stem>.curated.parquet: every row, the typed input columns (unless
+--drop-columns names some to leave out), the derived columns, the dedupe flags and
+one qc_<check> boolean per row-flagged check (True: the row fails it), with
+qc_error, qc_warn and qc_flags (the failing checks' names). No row is dropped:
+filter on the flags. Blank lines are dropped and counted in the report.
 Reports hold hashed user ids and masked subjects only, but
 keep DIR outside the repository anyway.
 
@@ -236,9 +244,13 @@ def run(
     # bad bytes or any cast failure, so reaching here means there were none;
     # recording that keeps the S1, S3 and S2 lines in the report.
     # The derived columns (receipt kind, profile, rider-spend flag) are computed
-    # once, then the dedupe flag; the checks read them, and the Parquet keeps only
-    # the input's columns.
-    enriched = supersede_flags(with_derived(df))
+    # once, then the dedupe flag; the checks read them and the curated Parquet
+    # keeps them.
+    lf = supersede_flags(with_derived(df)).lazy()
+    rules = configure_rules(default_rules(config.check_params()), config)
+    # One instance of the dataset checks: the outlier pair caches its scores in it,
+    # and the row flags below reuse them.
+    dataset_checks = default_dataset_checks(config.check_params(), config.sample_limit)
     results = configure_results(
         [
             header_valid_check(facts),
@@ -246,11 +258,9 @@ def run(
             cast_failures_check(dict.fromkeys(casts(), 0)),
             row_count_band_check(df.height, config.min_rows, config.max_rows),
             *run_checks(
-                enriched.lazy(),
-                rules=configure_rules(default_rules(config.check_params()), config),
-                dataset_checks=default_dataset_checks(
-                    config.check_params(), config.sample_limit
-                ),
+                lf,
+                rules=rules,
+                dataset_checks=dataset_checks,
                 sample_limit=config.sample_limit,
             ),
         ],
@@ -259,9 +269,11 @@ def run(
     by_name = {r.name: r for r in results}
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    output = out_dir / f"{input_stem(input_path)}.parquet"
-    kept = df.drop(drop_columns)
-    write_parquet(kept, output)
+    output = out_dir / f"{input_stem(input_path)}.curated.parquet"
+    flags = row_flags(lf, rules, dataset_checks, results)
+    plan = curated_plan(lf, flag_table(lf, flags), drop_columns)
+    output_columns = plan.collect_schema().len()
+    write_curated(plan, output)
 
     code = exit_code(results, config.fail_on)
     window = df["email_time"]
@@ -293,6 +305,7 @@ def run(
         cache=loaded.cache,
         blank_lines=facts.blank_lines,
         parquet_name=output.name,
+        curated_columns=output_columns,
     )
     written = write_report(out_dir, results, info, code)
     return Summary(
@@ -306,7 +319,7 @@ def run(
         results=results,
         facts=facts,
         output=output,
-        output_columns=kept.width,
+        output_columns=output_columns,
         written=written,
         config=config,
         exit_code=code,

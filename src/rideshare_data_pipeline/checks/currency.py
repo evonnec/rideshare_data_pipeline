@@ -16,6 +16,8 @@ from rideshare_data_pipeline.checks.model import (
     KEY_COLS,
     CheckResult,
     DatasetCheck,
+    FlaggedCheck,
+    Lazy,
     RowRule,
     Severity,
 )
@@ -159,6 +161,15 @@ def currency_suspect_check(lf: pl.LazyFrame) -> CheckResult:
     )
 
 
+def currency_suspect_flag(_lf: Lazy) -> pl.Expr:
+    """CUR1's failed rows: ``currency_suspect``."""
+    return pl.col("currency_suspect")
+
+
 def dataset_checks() -> tuple[DatasetCheck, ...]:
     """The currency checks that need the whole dataset, for the registry."""
-    return (currency_suspect_check,)
+    return (
+        FlaggedCheck(
+            "currency_suspect_rows", currency_suspect_check, currency_suspect_flag
+        ),
+    )

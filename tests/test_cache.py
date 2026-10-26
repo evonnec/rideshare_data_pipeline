@@ -96,8 +96,8 @@ def test_second_run_is_a_hit_that_neither_reads_nor_extracts(
     )
     assert comparable(hit) == comparable(miss) == comparable(off)
     assert_frame_equal(
-        pl.read_parquet(tmp_path / "o2" / "Data.parquet"),
-        pl.read_parquet(tmp_path / "o0" / "Data.parquet"),
+        pl.read_parquet(tmp_path / "o2" / "Data.curated.parquet"),
+        pl.read_parquet(tmp_path / "o0" / "Data.curated.parquet"),
     )
 
 

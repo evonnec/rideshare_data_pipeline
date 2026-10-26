@@ -25,7 +25,13 @@ from rideshare_data_pipeline.cli import (
     EXIT_OK,
     main,
 )
-from rideshare_data_pipeline.config import ConfigError, load_config, parse_config
+from rideshare_data_pipeline.config import (
+    KNOWN_CHECKS,
+    ConfigError,
+    load_config,
+    parse_config,
+)
+from rideshare_data_pipeline.curated import curated_schema
 from rideshare_data_pipeline.io import (
     CastError,
     cast_failures,
@@ -38,6 +44,8 @@ from rideshare_data_pipeline.io import (
 )
 from rideshare_data_pipeline.report import schema_text
 from rideshare_data_pipeline.schema import casts
+
+N_CURATED = len(curated_schema(KNOWN_CHECKS))
 
 
 def run_cli(csv: Path, out: Path, *extra: str) -> int:
@@ -250,7 +258,7 @@ def test_two_blank_lines_no_longer_fail_duplicate_rows(
     run = document["run"]
     assert isinstance(run, dict)
     assert (run["rows"], run["blank_lines"]) == (4, 2)
-    assert pl.read_parquet(out / "in.parquet").height == 4
+    assert pl.read_parquet(out / "in.curated.parquet").height == 4
 
 
 def test_the_summary_mentions_blank_lines_only_when_there_are_some(
@@ -310,13 +318,21 @@ def test_rerun_into_the_same_out_lists_only_this_runs_files(tmp_path: Path) -> N
     first = write_csv_text(tmp_path / "first.csv", synthetic_rows(3))
     second = write_csv_text(tmp_path / "second.csv", synthetic_rows(4))
     assert run_cli(first, out) == EXIT_OK
-    assert report(out)["outputs"] == {"parquet": "first.parquet", "samples": []}
+    assert report(out)["outputs"] == {
+        "parquet": "first.curated.parquet",
+        "curated": {"name": "first.curated.parquet", "rows": 3, "columns": N_CURATED},
+        "samples": [],
+    }
     assert run_cli(second, out) == EXIT_OK
     # the old Parquet is not deleted (the directory may hold other runs' files),
     # but report.json says which file is this run's
-    assert (out / "first.parquet").exists()
-    assert (out / "second.parquet").exists()
-    assert report(out)["outputs"] == {"parquet": "second.parquet", "samples": []}
+    assert (out / "first.curated.parquet").exists()
+    assert (out / "second.curated.parquet").exists()
+    assert report(out)["outputs"] == {
+        "parquet": "second.curated.parquet",
+        "curated": {"name": "second.curated.parquet", "rows": 4, "columns": N_CURATED},
+        "samples": [],
+    }
 
 
 def test_outputs_lists_the_sample_files(
@@ -326,7 +342,7 @@ def test_outputs_lists_the_sample_files(
     assert run_cli(full_synthetic_csv, out) == EXIT_GATED
     outputs = report(out)["outputs"]
     assert isinstance(outputs, dict)
-    assert outputs["parquet"] == "synthetic.parquet"
+    assert outputs["parquet"] == "synthetic.curated.parquet"
     samples = outputs["samples"]
     assert isinstance(samples, list)
     assert samples
@@ -410,11 +426,15 @@ def test_a_file_named_dot_csv_writes_input_parquet(tmp_path: Path) -> None:
     out = tmp_path / "out"
     assert run_cli(path, out) == EXIT_OK
     assert sorted(p.name for p in out.iterdir()) == [
-        "input.parquet",
+        "input.curated.parquet",
         "report.json",
         "report.md",
     ]
-    assert report(out)["outputs"] == {"parquet": "input.parquet", "samples": []}
+    assert report(out)["outputs"] == {
+        "parquet": "input.curated.parquet",
+        "curated": {"name": "input.curated.parquet", "rows": 3, "columns": N_CURATED},
+        "samples": [],
+    }
 
 
 # --- F11, F12: config validation -------------------------------------------------

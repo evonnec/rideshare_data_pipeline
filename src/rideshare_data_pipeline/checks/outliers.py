@@ -55,8 +55,11 @@ from rideshare_data_pipeline.checks.model import (
     SAMPLE_LIMIT,
     CheckResult,
     DatasetCheck,
+    FlaggedCheck,
     Frame,
+    Lazy,
     Severity,
+    rows_at,
 )
 from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.money import positive_usd_rides
@@ -412,8 +415,11 @@ def outlier_checks(
     univariate_k: float = DEFAULT_K_UNIVARIATE,
     sample_limit: int = SAMPLE_LIMIT,
     min_group: int = MIN_GROUP,
-) -> tuple[DatasetCheck, DatasetCheck]:
+) -> tuple[FlaggedCheck, DatasetCheck]:
     """O4 and O5 as a pair of checks that share one scoring pass.
+
+    O4 is a FlaggedCheck: its ``row_flag`` marks the rows it counted, from the same
+    cached scores (call it with the frame the check ran on; it never rescores).
 
     The first one called on a frame computes the scores and the second reuses them
     (the pair remembers the last frame it was given, by identity), as
@@ -434,10 +440,15 @@ def outlier_checks(
         sample = conditional_sample(lf, scores, conditional_k, sample_limit)
         return conditional_result(scores, conditional_k, sample)
 
+    def conditional_flag(lf: Lazy) -> pl.Expr:
+        frame = scores_of(lf).frame
+        flagged = frame.filter(pl.col("o4") & _pair_flags(conditional_k))
+        return rows_at(flagged["_row"])
+
     def univariate(lf: pl.LazyFrame) -> CheckResult:
         return univariate_result(scores_of(lf), univariate_k)
 
-    return conditional, univariate
+    return FlaggedCheck(CONDITIONAL, conditional, conditional_flag), univariate
 
 
 CONDITIONAL = "fare_outlier_conditional"
