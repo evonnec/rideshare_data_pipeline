@@ -169,3 +169,10 @@ def test_known_checks_match_the_registry(
     names = [cast_failures_check({}).name]
     names += [r.name for r in run_checks(full_synthetic_derived.lazy())]
     assert tuple(names) == KNOWN_CHECKS
+
+
+def test_configure_results_cuts_samples_to_the_sample_limit() -> None:
+    sample = pl.DataFrame({"x": [1, 2, 3]})
+    (out,) = configure_results([result(sample=sample)], QCConfig(sample_limit=2))
+    assert out.sample is not None
+    assert out.sample["x"].to_list() == [1, 2]

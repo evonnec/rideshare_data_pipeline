@@ -174,7 +174,7 @@ def test_registry_rules() -> None:
         "checksum_unique": Severity.ERROR,
         "category_mismatch": Severity.WARN,
     }
-    assert len(default_dataset_checks()) == 5
+    assert len(default_dataset_checks()) == 9
 
 
 def test_registered_rules_on_synthetic_data(tmp_path: Path) -> None:

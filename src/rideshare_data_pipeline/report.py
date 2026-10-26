@@ -274,6 +274,38 @@ def _composition_table(results: Sequence[CheckResult]) -> list[str]:
     ]
 
 
+def _duplicates_section(results: Sequence[CheckResult]) -> list[str]:
+    """The "Duplicate receipts" section body, from the ``duplicate_receipts`` result."""
+    for r in results:
+        if r.name != "duplicate_receipts":
+            continue
+        d = r.details
+        pairs = d.get("kind_pairs")
+        if not isinstance(pairs, list):
+            return ["_Not available._", ""]
+        spend = d.get("excess_spend")
+        spend_text = f"{spend:,.2f}" if isinstance(spend, int | float) else "n/a"
+        out = [
+            f"{d.get('groups', 0):,} order keys repeat, in {r.n_failed:,} rows. The "
+            f"dedupe flags {d.get('excess_rows', 0):,} of them as superseded (rows "
+            f"are never dropped); their rider spend is {spend_text} "
+            f"({d.get('currency', 'mixed currencies')}).",
+            "",
+        ]
+        if pairs:
+            out += _table(
+                ["kinds in the group", "groups", "excess spend"],
+                [
+                    [p["pair"], f"{p['groups']:,}", f"{p['excess_spend']:,.2f}"]
+                    for p in pairs
+                ],
+                right=(1, 2),
+            )
+            out.append("")
+        return out
+    return ["_Not available: the duplicate_receipts check is disabled._", ""]
+
+
 def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> str:
     """Render the report as Markdown."""
     s = summarize(results)
@@ -310,6 +342,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     )
     out += ["", "## Composition by receipt kind", ""]
     out += _composition_table(results)
+    out += ["## Duplicate receipts", ""]
+    out += _duplicates_section(results)
     out += ["## Column profile", ""]
     all_null = _columns(results, "all_null_columns")
     constant = _columns(results, "constant_columns")

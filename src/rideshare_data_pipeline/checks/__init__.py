@@ -38,7 +38,11 @@ def default_rules() -> tuple[RowRule, ...]:
 
 def default_dataset_checks() -> tuple[DatasetCheck, ...]:
     """Return every registered dataset check."""
-    return (*structural.dataset_checks(), *kinds.dataset_checks())
+    return (
+        *structural.dataset_checks(),
+        *kinds.dataset_checks(),
+        *uniqueness.dataset_checks(),
+    )
 
 
 def _fails(rule: RowRule) -> pl.Expr:

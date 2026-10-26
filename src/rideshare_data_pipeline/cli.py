@@ -21,6 +21,7 @@ from rideshare_data_pipeline.config import (
     configure_rules,
     load_config,
 )
+from rideshare_data_pipeline.dedupe import supersede_flags
 from rideshare_data_pipeline.io import (
     FileFacts,
     InputError,
@@ -185,8 +186,9 @@ def run(
     # read_typed raises CastError on any cast failure, so reaching here means there
     # were none; recording that keeps the S2 line in the report.
     # The derived columns (receipt kind, profile, rider-spend flag) are computed
-    # once; the checks read them, and the Parquet keeps only the input's columns.
-    enriched = with_derived(df)
+    # once, then the dedupe flag; the checks read them, and the Parquet keeps only
+    # the input's columns.
+    enriched = supersede_flags(with_derived(df))
     results = configure_results(
         [
             cast_failures_check(dict.fromkeys(casts(), 0)),

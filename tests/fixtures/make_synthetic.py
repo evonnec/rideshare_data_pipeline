@@ -77,6 +77,7 @@ SEED = 20190301
 MANIFEST: dict[str, int] = {
     # --- implemented now (asserted in tests/test_synthetic.py) -----------------
     "S2": 0,  # no value fails its cast
+    "U2b": 0,  # after the dedupe no key repeats among the kept rows
     # A1 applies to rider-spend receipts only: the bike's -4.50 (a non-spend kind) is
     # not counted. The injected negative car ride is, and it is the only A1 failure.
     # Later checks must not count it twice: A3 (zero fare) means exactly 0, and the
@@ -89,6 +90,11 @@ MANIFEST: dict[str, int] = {
     # --- reserved for later PRs -------------------------------------------------
     "U2": 6,  # rows sharing a non-null key: duplicate_order_key 2 + cross 2 + tip 2
     "U2.groups": 3,  # one key each: duplicate_order_key, cross, ride_tip_update
+    # One row of each group is superseded: the later email wins both rides-only
+    # groups (duplicate_order_key, cross), and the tip update wins its pair, so the
+    # superseded rows are the first duplicate_order_key row, the first cross row and
+    # the original ride. The 3 monthly pass rows have no order number: never superseded.
+    "U2.superseded": 3,  # = U2.groups: every group has exactly 2 rows
     "U3": 2,  # cross_panelist_duplicate (2 user_ids on one key)
     "U3.groups": 1,
     # near_duplicate pair: 1 excess row. The duplicate_order_key pair is identical
