@@ -10,6 +10,7 @@ import csv
 import hashlib
 import io
 import tarfile
+import uuid
 import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -40,7 +41,8 @@ def synthetic_row(i: int) -> Row:
     return {
         "merchant_name": ("Uber", "Lyft")[i % 2],
         "user_id": hashlib.sha256(f"synthetic-user-{i}".encode()).hexdigest(),
-        "order_number": str(1_000_000_000_000_000_000 + i),
+        # Well formed per merchant (S6): a UUID for Uber, 19 digits for Lyft.
+        "order_number": (str(uuid.UUID(int=i + 1)) if i % 2 == 0 else str(10**18 + i)),
         "order_time": f"2019-01-{day} 08:00:00.000",
         "email_time": f"2019-01-{day} 09:00:00.000",
         "insert_time": f"2019-01-{day} 10:00:00.000",

@@ -14,7 +14,12 @@ from pathlib import Path
 from rideshare_data_pipeline import __version__
 from rideshare_data_pipeline.checks import default_rules, run_checks
 from rideshare_data_pipeline.checks.model import CheckResult, Severity
-from rideshare_data_pipeline.checks.structural import cast_failures_check
+from rideshare_data_pipeline.checks.structural import (
+    cast_failures_check,
+    header_valid_check,
+    row_count_band_check,
+    utf8_valid_check,
+)
 from rideshare_data_pipeline.config import (
     QCConfig,
     configure_results,
@@ -35,6 +40,7 @@ from rideshare_data_pipeline.report import (
     RunInfo,
     Written,
     exit_code,
+    metric_text,
     summarize,
     write_report,
 )
@@ -183,15 +189,19 @@ def run(
     started, clock = _utc_now(), time.perf_counter()
     with input_csv(input_path) as csv_path:
         df, facts = read_typed(csv_path)
-    # read_typed raises CastError on any cast failure, so reaching here means there
-    # were none; recording that keeps the S2 line in the report.
+    # read_typed raises HeaderError, EncodingError or CastError on a bad header,
+    # bad bytes or any cast failure, so reaching here means there were none;
+    # recording that keeps the S1, S3 and S2 lines in the report.
     # The derived columns (receipt kind, profile, rider-spend flag) are computed
     # once, then the dedupe flag; the checks read them, and the Parquet keeps only
     # the input's columns.
     enriched = supersede_flags(with_derived(df))
     results = configure_results(
         [
+            header_valid_check(facts),
+            utf8_valid_check(facts),
             cast_failures_check(dict.fromkeys(casts(), 0)),
+            row_count_band_check(df.height, config.min_rows, config.max_rows),
             *run_checks(
                 enriched.lazy(),
                 rules=configure_rules(default_rules(), config),
@@ -281,7 +291,7 @@ def format_summary(summary: Summary) -> str:
 
 def format_check(result: CheckResult) -> str:
     """Render one result as an aligned line: severity, status, name, counts, rate."""
-    rate = "n/a" if result.metric is None else f"{result.metric:.4%}"
+    rate = metric_text(result)
     return (
         f"{result.severity.value:<5}  {'PASS' if result.passed else 'FAIL'}  "
         f"{result.name:<30}  {result.n_failed:>9,}/{result.n_evaluated:<9,}  {rate:>9}"

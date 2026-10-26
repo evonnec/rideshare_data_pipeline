@@ -251,8 +251,17 @@ def _pct(metric: float | None) -> str:
     return "n/a" if metric is None else f"{metric:.4%}"
 
 
+def metric_text(result: CheckResult) -> str:
+    """The metric as text: a percentage, or a count for the row-count band."""
+    if result.name == "row_count_band" and result.metric is not None:
+        return f"{result.metric:,.0f} rows"
+    return _pct(result.metric)
+
+
 def _num(threshold: float | None) -> str:
-    return "n/a" if threshold is None else f"{threshold:g}"
+    if threshold is None:
+        return "n/a"
+    return f"{threshold:,.0f}" if threshold >= 1000 else f"{threshold:g}"
 
 
 def _sorted(results: Sequence[CheckResult]) -> list[CheckResult]:
@@ -497,7 +506,7 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
                 r.severity.value,
                 "PASS" if r.passed else "FAIL",
                 f"{r.n_failed:,}",
-                _pct(r.metric),
+                metric_text(r),
                 _num(r.threshold),
                 r.predicate,
             ]

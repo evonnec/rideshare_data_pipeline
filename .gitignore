@@ -184,3 +184,4 @@ rideshare/
 *.feather
 *.arrow
 !tests/fixtures/**
+tests/fixtures/**/__pycache__/

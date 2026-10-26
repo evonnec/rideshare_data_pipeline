@@ -9,7 +9,7 @@ decorators, no plugins. run_checks() takes the rule sets as arguments, so a
 caller (a test, or later a config with per-check thresholds) can pass its own.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 lazy import polars as pl
 
@@ -41,6 +41,7 @@ __all__ = [
 def default_rules() -> tuple[RowRule, ...]:
     """Return every registered row rule."""
     return (
+        *structural.rules(),
         *arithmetic.rules(),
         *uniqueness.rules(),
         *kinds.rules(),
@@ -59,17 +60,18 @@ def default_dataset_checks() -> tuple[DatasetCheck, ...]:
     )
 
 
-def _fails(rule: RowRule) -> pl.Expr:
+def _fails(rule: RowRule, predicate: pl.Expr | None = None) -> pl.Expr:
     """The rows that count as failed: applicable, and the predicate is True.
 
     A null predicate means "can't tell", which is not a failure (a missing value
     is a completeness question, not an arithmetic one); fill_null makes that rule
-    explicit so it doesn't depend on how `&` treats nulls. This is also the filter
-    of the sample query, so it holds no length-broadcast literal (``pl.repeat``,
-    as `_applies` does): that combined with ``head`` made the streaming engine
-    panic now and then.
+    explicit so it doesn't depend on how `&` treats nulls. `predicate` defaults to
+    the rule's own (a breakdown field passes its own). This is also the filter of
+    the sample query, so it holds no length-broadcast literal (``pl.repeat``, as
+    `_applies` does): that combined with ``head`` made the streaming engine panic
+    now and then.
     """
-    failed = rule.predicate.fill_null(False)
+    failed = (rule.predicate if predicate is None else predicate).fill_null(False)
     if rule.applies_to is not None:
         failed = failed & rule.applies_to.fill_null(False)
     return failed
@@ -85,7 +87,11 @@ def _applies(rule: RowRule) -> pl.Expr:
 
 
 def _result(
-    rule: RowRule, n_failed: int, n_evaluated: int, sample: pl.DataFrame | None
+    rule: RowRule,
+    n_failed: int,
+    n_evaluated: int,
+    sample: pl.DataFrame | None,
+    by_field: Mapping[str, int] | None = None,
 ) -> CheckResult:
     """Judge one rule: passed when failed / evaluated <= max_failed_rate.
 
@@ -105,6 +111,7 @@ def _result(
         n_evaluated=n_evaluated,
         predicate=rule.rule,
         sample=sample,
+        details={} if by_field is None else {"by_field": dict(by_field)},
     )
 
 
@@ -127,6 +134,10 @@ def run_rules(
             for expr in (
                 _fails(rule).sum().alias(f"failed_{i}"),
                 _applies(rule).sum().alias(f"evaluated_{i}"),
+                *(
+                    _fails(rule, expr).sum().alias(f"field_{i}_{j}")
+                    for j, expr in enumerate(rule.breakdown.values())
+                ),
             )
         )
         .collect(engine="streaming")
@@ -135,8 +146,17 @@ def run_rules(
     failed = [counts[f"failed_{i}"] for i in range(len(rules))]
     evaluated = [counts[f"evaluated_{i}"] for i in range(len(rules))]
 
+    by_field = [
+        (
+            {name: counts[f"field_{i}_{j}"] for j, name in enumerate(r.breakdown)}
+            if r.breakdown
+            else None
+        )
+        for i, r in enumerate(rules)
+    ]
     judged = [
-        _result(r, f, n, None) for r, f, n in zip(rules, failed, evaluated, strict=True)
+        _result(r, f, n, None, b)
+        for r, f, n, b in zip(rules, failed, evaluated, by_field, strict=True)
     ]
     failing = [i for i, res in enumerate(judged) if not res.passed]
     if not failing:
@@ -153,7 +173,7 @@ def run_rules(
         engine="streaming",
     )
     for i, sample in zip(failing, samples, strict=True):
-        judged[i] = _result(rules[i], failed[i], evaluated[i], sample)
+        judged[i] = _result(rules[i], failed[i], evaluated[i], sample, by_field[i])
     return judged
 
 

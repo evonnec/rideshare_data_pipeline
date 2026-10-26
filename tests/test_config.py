@@ -122,6 +122,8 @@ def test_configure_rules_replaces_and_drops() -> None:
     )
     rules = {r.name: r for r in configure_rules(default_rules(), config)}
     assert list(rules) == [
+        "required_fields",
+        "id_formats",
         "non_negative_total",
         "category_mismatch",
         "merchant_sender_consistent",
@@ -169,9 +171,7 @@ def test_configure_results_severity_only_keeps_the_verdict() -> None:
 def test_known_checks_match_the_registry(
     full_synthetic_derived: pl.DataFrame,
 ) -> None:
-    from rideshare_data_pipeline.checks.structural import cast_failures_check
-
-    names = [cast_failures_check({}).name]
+    names = ["header_valid", "utf8_valid", "cast_failures", "row_count_band"]
     names += [r.name for r in run_checks(full_synthetic_derived.lazy())]
     assert tuple(names) == KNOWN_CHECKS
 

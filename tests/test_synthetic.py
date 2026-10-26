@@ -20,9 +20,14 @@ from fixtures.make_synthetic import (
 from synthetic import ALL_NULL, CONSTANT, read_typed_frame
 
 from rideshare_data_pipeline.checks import run_checks
-from rideshare_data_pipeline.checks.structural import cast_failures_check
+from rideshare_data_pipeline.checks.structural import (
+    cast_failures_check,
+    header_valid_check,
+    row_count_band_check,
+    utf8_valid_check,
+)
 from rideshare_data_pipeline.cli import main as qc_main
-from rideshare_data_pipeline.io import cast_failures, read_raw
+from rideshare_data_pipeline.io import cast_failures, inspect_csv, read_raw
 from rideshare_data_pipeline.money import usd_rides
 from rideshare_data_pipeline.parse import KINDS
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
@@ -201,11 +206,23 @@ def test_implemented_checks_match_the_manifest(
 ) -> None:
     results = run_checks(full_synthetic_derived.lazy())
     results.append(cast_failures_check(cast_failures(read_raw(full_synthetic_csv))))
+    facts = inspect_csv(full_synthetic_csv)
+    results += [
+        header_valid_check(facts),
+        utf8_valid_check(facts),
+        row_count_band_check(full_synthetic_derived.height, 1, None),
+    ]
     found = {r.check_id: r.n_failed for r in results}
     expected = {
         k: MANIFEST[k]
         for k in (
+            "S1",
             "S2",
+            "S3",
+            "C1",
+            "C2",
+            "C3",
+            "S6",
             "A1",
             "U1",
             "S4",
@@ -437,7 +454,12 @@ def test_cli_end_to_end_on_the_full_fixture(
 
     lines = {line.split()[2]: line.split() for line in checks.splitlines()}
     assert list(lines) == [
+        "header_valid",
+        "utf8_valid",
         "cast_failures",
+        "row_count_band",
+        "required_fields",
+        "id_formats",
         "non_negative_total",
         "checksum_unique",
         "category_mismatch",
@@ -446,6 +468,7 @@ def test_cli_end_to_end_on_the_full_fixture(
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
+        "ride_completeness",
         "receipt_kinds",
         "unclassified_subject_templates",
         "duplicate_receipts",

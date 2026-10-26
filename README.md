@@ -6,7 +6,7 @@ Quality-control and outlier checks for a consumer e-receipt panel sample coverin
 
 A data vendor parses the receipt emails that a panel of long-tenured, active consumers get from rideshare merchants, and delivers one row per receipt: who (a hashed panelist ID), when (trip, email and ingestion times), how much (totals, tax, discounts), what (a free-text product line), and vendor delivery metadata. There is no data dictionary, so the meaning of each field has to be inferred from the data itself. The goal is to design and run practical quality-control and outlier tests on that sample, and to state the assumptions behind them.
 
-This first version validates the file's UTF-8 encoding and header, reads every column as text, casts the columns to their types while counting any value that doesn't convert, and reports structural problems: columns that are entirely null, columns that hold a single value, and exact duplicate rows. It then classifies every receipt by kind (a ride, a tip update, a driver payout, a pass, and so on; see [Receipt kinds](#receipt-kinds)). The [roadmap](#roadmap) lists the checks still to come.
+This first version validates the file's UTF-8 encoding and header, reads every column as text, casts the columns to their types while counting any value that doesn't convert, and reports structural and completeness problems (see [Structural and completeness checks](#structural-and-completeness-checks)): columns that are entirely null or constant, exact duplicate rows, null required fields, malformed IDs, incomplete rides and an out-of-band row count. It then classifies every receipt by kind (a ride, a tip update, a driver payout, a pass, and so on; see [Receipt kinds](#receipt-kinds)). The [roadmap](#roadmap) lists the checks still to come.
 
 ## Data handling
 
@@ -48,14 +48,20 @@ constant columns: 4 (order_total_qty, item_quantity, digital_transaction, produc
 duplicate rows:   0
 wrote:            reports/receipts.parquet (33 columns)
 
+error  PASS  header_valid                  0/1            0.0000%
+error  PASS  utf8_valid                    0/1            0.0000%
 error  PASS  cast_failures                 0/20           0.0000%
+warn   PASS  row_count_band                0/1               3 rows
+error  PASS  required_fields               0/3            0.0000%
+warn   PASS  id_formats                    0/3            0.0000%
 error  PASS  non_negative_total            0/3            0.0000%
 error  PASS  checksum_unique               0/3            0.0000%
 info   PASS  all_null_columns              5/33          15.1515%
 info   PASS  constant_columns              4/33          12.1212%
 error  PASS  duplicate_rows                0/3            0.0000%
+warn   PASS  ride_completeness             0/3            0.0000%
 
-errors failed: 0  warnings failed: 0  passed: 6/6  fail-on: error  exit: 0
+errors failed: 0  warnings failed: 0  passed: 11/11  fail-on: error  exit: 0
 wrote: reports/report.json
 wrote: reports/report.md
 ```
@@ -98,6 +104,21 @@ The legacy whole-row duplicate check could never fire: `checksum` is unique per 
 
 U2 is a warning because a repeated key is expected vendor behaviour (re-sent receipts, a receipt in two mailboxes) that the dedupe resolves; an error would make every real run exit 1. Excess spend is USD rider spend only; the currency-suspect part is reported apart as `excess_spend_suspect`.
 
+## Structural and completeness checks
+
+S1, S2 and S3 guard the input contract: a bad header, invalid UTF-8 or a value that doesn't cast is an input error (exit 2, nothing written), so on a run that produced a report they are recorded as passing error results (S1 `details`: the column count and `in_order`; S3: `has_bom` and `line_ending`). The rest report and never fix.
+
+| Check | Severity | Rule (threshold) |
+|---|---|---|
+| `header_valid` (S1) | error | the 33 expected columns, in order |
+| `utf8_valid` (S3) | error | the file is valid UTF-8; BOM and line endings recorded |
+| `cast_failures` (S2) | error | every non-null raw value converts to its column's type |
+| `row_count_band` | warn | `min_rows` <= rows <= `max_rows` (defaults: 1, no limit), so a header-only file fails; the metric is the row count |
+| `required_fields` (C1) | error | `merchant_name`, `user_id`, `email_time`, `checksum`, `from_domain`, `email_subject` are never null (0); `details.by_field` has the null count per column |
+| `id_formats` (S6) | warn | `user_id` is 64 lowercase hex digits, `checksum` 32, a Lyft order number 18-19 digits, an Uber one a lowercase UUID (0); nulls are not judged (C1 and C2 own them); `details.by_field` counts each. Freight `UF-` order numbers fail it |
+| `ride_completeness` (C2) | warn | among rides that are not superseded, the null rate of `order_total_amount` is at most 0.01%, and of `order_number` and `order_time` at most 0.5% each. `n_failed` is the rides missing any of the three; `metric` and `threshold` are those of the field nearest its limit, `details` has all three |
+| `all_null_columns` (S4), `constant_columns` (S5) | info | columns null in every row, or with one distinct non-null value; one shared aggregation |
+
 ## Currency and the USD gate
 
 The file has no currency column, yet receipts from non-US merchant senders state amounts in local currency: about 0.5% of rows are about 37% of a naive spend total. `from_domain` is the **full sender address**, and it carries the evidence. `sender.py` derives `sender_country` from public receipt-sender patterns (`uber.<country>@` to an ISO code, `receipts.<city>@` to its country with US as the default city; generic senders such as `noreply@` give null; an unknown `uber.<token>@` is `unknown`, treated as non-US). `currency_reason` is the first of `non_us_sender`, `km_unit` (the description states kilometres) and `foreign_language` (a Spanish or Portuguese subject: `Tu ... del ...`, `por la mañana`, `Sua viagem`, `Error de pago`). `currency_suspect` is true where there is a reason. Rows are flagged, never dropped, and no exchange rate is applied (FX conversion is future work).
@@ -119,6 +140,8 @@ Defaults live in code (`QCConfig` in `config.py`); a TOML file overrides them. [
 ```toml
 sample_limit = 20          # failing rows kept per check
 fail_on = "error"          # "error" or "warn"; --fail-on overrides it
+min_rows = 1               # row_count_band: fewest rows (0 = no lower bound)
+# max_rows = 5000000       # row_count_band: most rows (default: no limit)
 
 [checks.non_negative_total]
 max_failed_rate = 0.01     # passes while failed / evaluated <= 0.01
@@ -193,8 +216,9 @@ src/rideshare_data_pipeline/
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
     parsing.py        description_parse_coverage (PC1)
     currency.py       currency_suspect_rows (CUR1), merchant_sender_consistent (V1), unknown_sender (V3)
-    structural.py     all-null and constant columns (one lazy select), duplicate rows,
-                      and their DatasetCheck wrappers
+    structural.py     S1/S3 results from the file facts, row_count_band, C1 required_fields and
+                      S6 id_formats (RowRules), C2 ride_completeness, S4/S5 (one shared
+                      aggregation), duplicate rows
 tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
@@ -223,7 +247,7 @@ Planned work is tracked in the GitHub issues:
 - Data hygiene and the input contract: guarding against committing data (#6), schema, header and encoding validation (#8), hardened extraction and a Parquet cache (#17).
 - Check framework and reporting: the CheckResult model and runner (#9), a synthetic fixture generator (#10), and the JSON and Markdown report with exit codes and TOML thresholds (#11, done).
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
-- Checks: structural and completeness (#16), arithmetic (#18), temporal (#19), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
+- Checks: structural and completeness (#16, done), arithmetic (#18), temporal (#19), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22), privacy normalization (#30), and a stakeholder summary (#31).
 - Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).
 

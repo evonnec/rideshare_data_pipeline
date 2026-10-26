@@ -26,7 +26,13 @@ from rideshare_data_pipeline.report import (
 )
 
 IMPLEMENTED = (
+    "S1",
     "S2",
+    "S3",
+    "C1",
+    "C2",
+    "C3",
+    "S6",
     "A1",
     "U1",
     "S4",
@@ -42,6 +48,7 @@ IMPLEMENTED = (
     "V3",
 )
 DUPLICATE_CHECKS = (
+    "id_formats",
     "currency_suspect_rows",
     "unknown_sender",
     "duplicate_receipts",
@@ -126,6 +133,7 @@ def test_run_writes_reports_and_samples(
         "category_mismatch.parquet",
         "cross_panelist_duplicates.parquet",
         "duplicate_receipts.parquet",
+        "id_formats.parquet",
         "near_duplicate_rides.parquet",
         "non_negative_total.parquet",
         "unknown_sender.parquet",
@@ -174,10 +182,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 6,  # V2, U2, U3, U4, CUR1, V3
+        "warnings_failed": 7,  # V2, U2, U3, U4, CUR1, V3, S6
         "info": 4,
-        "passed": 10,
-        "total": 17,
+        "passed": 15,
+        "total": 23,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -397,7 +405,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 7  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3
+    assert report["summary"]["warnings_failed"] == 8  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
