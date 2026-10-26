@@ -6,13 +6,18 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from rideshare_data_pipeline.checks import default_rules, run_checks
-from rideshare_data_pipeline.checks.model import CheckResult, Severity
+from rideshare_data_pipeline.checks import (
+    default_dataset_checks,
+    default_rules,
+    run_checks,
+)
+from rideshare_data_pipeline.checks.model import CheckResult, Severity, check_name
 from rideshare_data_pipeline.config import (
     KNOWN_CHECKS,
     CheckOverride,
     ConfigError,
     QCConfig,
+    configure_dataset_checks,
     configure_results,
     configure_rules,
     load_config,
@@ -290,3 +295,34 @@ def test_invalid_plausibility_params_raise(
 ) -> None:
     with pytest.raises(ConfigError, match=message):
         load_config(write(tmp_path, text))
+
+
+# --- disabled dataset checks are never computed ----------------------------------
+
+
+def test_every_registered_dataset_check_names_its_result() -> None:
+
+    names = [check_name(c) for c in default_dataset_checks()]
+    assert None not in names
+    assert set(names) <= set(KNOWN_CHECKS)
+    assert len(set(names)) == len(names)
+
+
+def test_a_disabled_dataset_check_is_dropped_before_it_runs() -> None:
+
+    config = parse_config(
+        {
+            "checks": {
+                "duplicate_rows": {"enabled": False},
+                "identity_share": {"enabled": False},
+            }
+        }
+    )
+    kept = {
+        check_name(c)
+        for c in configure_dataset_checks(default_dataset_checks(), config)
+    }
+    assert "duplicate_rows" not in kept
+    assert "identity_share" not in kept
+    assert "all_null_columns" in kept
+    assert len(kept) == len(default_dataset_checks()) - 2

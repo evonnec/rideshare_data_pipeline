@@ -28,6 +28,7 @@ from rideshare_data_pipeline.checks.structural import (
 )
 from rideshare_data_pipeline.config import (
     QCConfig,
+    configure_dataset_checks,
     configure_results,
     configure_rules,
     load_config,
@@ -249,8 +250,10 @@ def run(
     lf = supersede_flags(with_derived(df)).lazy()
     rules = configure_rules(default_rules(config.check_params()), config)
     # One instance of the dataset checks: the outlier pair caches its scores in it,
-    # and the row flags below reuse them.
-    dataset_checks = default_dataset_checks(config.check_params(), config.sample_limit)
+    # and the row flags below reuse them. A disabled check is not run at all.
+    dataset_checks = configure_dataset_checks(
+        default_dataset_checks(config.check_params(), config.sample_limit), config
+    )
     results = configure_results(
         [
             header_valid_check(facts),

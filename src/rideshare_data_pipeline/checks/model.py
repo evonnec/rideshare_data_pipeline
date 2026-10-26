@@ -118,6 +118,27 @@ def rows_at(positions: pl.Series) -> pl.Expr:
 
 
 @dataclass(frozen=True, slots=True)
+class NamedCheck:
+    """A dataset check that knows the name of the result it returns.
+
+    Calling it runs the check, so it is a DatasetCheck. The name lets a caller skip
+    a check it will drop anyway (a disabled one) before computing it; a bare
+    function has no name, so it is always run. See ``check_name``.
+    """
+
+    name: str
+    check: DatasetCheck
+
+    def __call__(self, lf: pl.LazyFrame) -> CheckResult:
+        return self.check(lf)
+
+
+def check_name(check: DatasetCheck) -> str | None:
+    """The name of the result `check` returns, if it says (NamedCheck, FlaggedCheck)."""
+    return check.name if isinstance(check, NamedCheck | FlaggedCheck) else None
+
+
+@dataclass(frozen=True, slots=True)
 class FlaggedCheck:
     """A dataset check that can also say which rows it counted as failed.
 

@@ -58,6 +58,7 @@ from rideshare_data_pipeline.checks.model import (
     FlaggedCheck,
     Frame,
     Lazy,
+    NamedCheck,
     Severity,
     rows_at,
 )
@@ -415,7 +416,7 @@ def outlier_checks(
     univariate_k: float = DEFAULT_K_UNIVARIATE,
     sample_limit: int = SAMPLE_LIMIT,
     min_group: int = MIN_GROUP,
-) -> tuple[FlaggedCheck, DatasetCheck]:
+) -> tuple[FlaggedCheck, NamedCheck]:
     """O4 and O5 as a pair of checks that share one scoring pass.
 
     O4 is a FlaggedCheck: its ``row_flag`` marks the rows it counted, from the same
@@ -448,7 +449,10 @@ def outlier_checks(
     def univariate(lf: pl.LazyFrame) -> CheckResult:
         return univariate_result(scores_of(lf), univariate_k)
 
-    return FlaggedCheck(CONDITIONAL, conditional, conditional_flag), univariate
+    return (
+        FlaggedCheck(CONDITIONAL, conditional, conditional_flag),
+        NamedCheck(UNIVARIATE, univariate),
+    )
 
 
 CONDITIONAL = "fare_outlier_conditional"

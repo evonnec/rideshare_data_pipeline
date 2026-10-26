@@ -22,6 +22,7 @@ from rideshare_data_pipeline.checks.model import (
     CheckResult,
     DatasetCheck,
     FlaggedCheck,
+    NamedCheck,
     RowRule,
     Severity,
     rows_at,
@@ -470,8 +471,8 @@ def dataset_checks() -> tuple[DatasetCheck, ...]:
     """
     all_null, constant = column_profile_checks()
     return (
-        all_null,
-        constant,
+        NamedCheck("all_null_columns", all_null),
+        NamedCheck("constant_columns", constant),
         duplicate_rows(),
-        ride_completeness_check,
+        NamedCheck("ride_completeness", ride_completeness_check),
     )
