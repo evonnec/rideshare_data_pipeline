@@ -22,6 +22,7 @@ from rideshare_data_pipeline.checks.structural import (
     constant_columns_check,
     duplicate_rows_check,
 )
+from rideshare_data_pipeline.parse import derived_columns
 
 
 def lazy(data: dict[str, list[Any]]) -> pl.LazyFrame:
@@ -46,7 +47,7 @@ def rule(
 
 def synthetic_frame(tmp_path: Path, n: int) -> pl.LazyFrame:
     path = write_csv_text(tmp_path / "s.csv", synthetic_rows(n))
-    return read_typed_frame(path).lazy()
+    return read_typed_frame(path).with_columns(derived_columns()).lazy()
 
 
 def one(r: RowRule, lf: pl.LazyFrame, **kw: Any) -> Any:
@@ -163,19 +164,27 @@ def test_samples_for_all_failing_rules_add_one_batch(
     assert [r.sample is not None for r in results] == [True, True, False]
 
 
-def test_registry_has_the_two_example_rules() -> None:
+def test_registry_rules() -> None:
     rules = {r.name: r for r in default_rules()}
     assert rules["non_negative_total"].check_id == "A1"
     assert rules["checksum_unique"].check_id == "U1"
-    assert all(r.severity is Severity.ERROR for r in rules.values())
-    assert len(default_dataset_checks()) == 3
+    assert rules["category_mismatch"].check_id == "V2"
+    assert {n: r.severity for n, r in rules.items()} == {
+        "non_negative_total": Severity.ERROR,
+        "checksum_unique": Severity.ERROR,
+        "category_mismatch": Severity.WARN,
+    }
+    assert len(default_dataset_checks()) == 5
 
 
 def test_registered_rules_on_synthetic_data(tmp_path: Path) -> None:
     lf = synthetic_frame(tmp_path, 5)
     assert all(r.passed for r in run_checks(lf, dataset_checks=[]))
 
+    # The synthetic rows carry a reseller, so they are food orders; A1 only looks at
+    # rider-spend rows, so mark them as such.
     bad = lf.with_columns(
+        is_rider_spend=pl.lit(True),
         order_total_amount=pl.when(pl.col("order_number").is_first_distinct())
         .then(pl.lit(-1.0))
         .otherwise(pl.col("order_total_amount")),

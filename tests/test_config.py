@@ -121,7 +121,7 @@ def test_configure_rules_replaces_and_drops() -> None:
         }
     )
     rules = {r.name: r for r in configure_rules(default_rules(), config)}
-    assert list(rules) == ["non_negative_total"]
+    assert list(rules) == ["non_negative_total", "category_mismatch"]
     assert rules["non_negative_total"].max_failed_rate == 0.5
     assert rules["non_negative_total"].severity is Severity.WARN
     # An untouched rule is returned as it was.
@@ -161,9 +161,11 @@ def test_configure_results_severity_only_keeps_the_verdict() -> None:
     assert (out.severity, out.passed, out.threshold) == (Severity.INFO, False, 0.0)
 
 
-def test_known_checks_match_the_registry(full_synthetic_frame: pl.DataFrame) -> None:
+def test_known_checks_match_the_registry(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
     from rideshare_data_pipeline.checks.structural import cast_failures_check
 
     names = [cast_failures_check({}).name]
-    names += [r.name for r in run_checks(full_synthetic_frame.lazy())]
+    names += [r.name for r in run_checks(full_synthetic_derived.lazy())]
     assert tuple(names) == KNOWN_CHECKS

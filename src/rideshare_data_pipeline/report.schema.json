@@ -100,6 +100,31 @@
         }
       }
     },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "merchants", "kinds"],
+      "description": "Receipts by merchant and receipt kind; present when the receipt_kinds check ran.",
+      "properties": {
+        "rows": { "type": "integer", "minimum": 0 },
+        "merchants": { "type": "array", "items": { "type": "string" }, "description": "Merchant names, sorted; the keys of every by_merchant." },
+        "kinds": {
+          "type": "array",
+          "description": "Every receipt kind, in canonical order (zero counts included).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "rider_spend", "total", "by_merchant"],
+            "properties": {
+              "kind": { "enum": ["ride", "tip_update", "fare_correction", "cancel_noshow", "payment_failed", "driver_earnings", "pass_or_credit", "micromobility", "food_order", "freight", "rental"] },
+              "rider_spend": { "type": "boolean", "description": "Counts toward rider spend (ride, tip_update, fare_correction, cancel_noshow)." },
+              "total": { "type": "integer", "minimum": 0 },
+              "by_merchant": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+            }
+          }
+        }
+      }
+    },
     "exit_code": { "enum": [0, 1], "description": "The exit status of the run (2 is never written: input errors produce no report)." }
   }
 }

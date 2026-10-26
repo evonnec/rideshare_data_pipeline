@@ -22,6 +22,7 @@ from rideshare_data_pipeline.checks import run_checks
 from rideshare_data_pipeline.checks.structural import cast_failures_check
 from rideshare_data_pipeline.cli import main as qc_main
 from rideshare_data_pipeline.io import cast_failures, read_raw
+from rideshare_data_pipeline.parse import KINDS
 from rideshare_data_pipeline.schema import EXPECTED_COLUMNS
 
 N_BASELINE = 248
@@ -129,6 +130,9 @@ def test_injected_rows_are_where_the_registry_says(
     df = full_synthetic_frame
     (bike,) = INJECTIONS["bike"]
     assert df["order_total_amount"][bike] == -4.5
+    (negative_ride,) = INJECTIONS["negative_total_ride"]
+    assert df["order_total_amount"][negative_ride] < 0
+    assert df["product_description"][negative_ride].startswith("UberX")
     (freight,) = INJECTIONS["freight"]
     assert df["order_number"][freight].startswith("UF-")
     (old,) = INJECTIONS["ancient_order"]
@@ -170,6 +174,10 @@ def test_manifest_matches_the_injections() -> None:
     assert MANIFEST["K1.food_order"] == n["food_orders"]
     kinds = ("driver_earnings", "pass", "micromobility", "food_order", "freight")
     assert MANIFEST["K1.non_spend"] == sum(MANIFEST[f"K1.{k}"] for k in kinds)
+    assert (
+        MANIFEST["K1.ride"]
+        == N_ROWS - MANIFEST["K1.non_spend"] - MANIFEST["K1.tip_update"]
+    )
     assert MANIFEST["V2"] == (
         MANIFEST["K1.driver_earnings"]
         + MANIFEST["K1.food_order"]
@@ -186,18 +194,98 @@ def test_manifest_matches_the_injections() -> None:
 
 
 def test_implemented_checks_match_the_manifest(
-    full_synthetic_csv: Path, full_synthetic_frame: pl.DataFrame
+    full_synthetic_csv: Path, full_synthetic_derived: pl.DataFrame
 ) -> None:
-    results = run_checks(full_synthetic_frame.lazy())
+    results = run_checks(full_synthetic_derived.lazy())
     results.append(cast_failures_check(cast_failures(read_raw(full_synthetic_csv))))
     found = {r.check_id: r.n_failed for r in results}
-    assert found == {k: MANIFEST[k] for k in ("S2", "A1", "U1", "S4", "S5", "U0")}
+    expected = {k: MANIFEST[k] for k in ("S2", "A1", "U1", "S4", "S5", "U0", "V2")}
+    # K1's n_failed is the non-spend rows; K2 (unclassified templates) finds none.
+    assert found == {**expected, "K1": MANIFEST["K1.non_spend"], "K2": 0}
+
+
+# manifest key -> receipt kind
+KIND_KEYS = {
+    "K1.ride": "ride",
+    "K1.tip_update": "tip_update",
+    "K1.driver_earnings": "driver_earnings",
+    "K1.pass": "pass_or_credit",
+    "K1.micromobility": "micromobility",
+    "K1.food_order": "food_order",
+    "K1.freight": "freight",
+}
+
+
+def test_kind_counts_equal_the_manifest(full_synthetic_derived: pl.DataFrame) -> None:
+    counts = dict(
+        full_synthetic_derived["receipt_kind"].cast(pl.String).value_counts().rows()
+    )
+    assert counts == {kind: MANIFEST[key] for key, kind in KIND_KEYS.items()}
+    # The kinds the fixture doesn't inject are absent, not misclassified.
+    for kind in ("fare_correction", "cancel_noshow", "payment_failed", "rental"):
+        assert kind not in counts
+    spend = full_synthetic_derived["is_rider_spend"].sum()
+    assert N_ROWS - spend == MANIFEST["K1.non_spend"]
+
+
+def test_kind_check_details_match_the_manifest(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    k1 = by_id["K1"]
+    assert k1.details["counts"] == {
+        **dict.fromkeys(KINDS, 0),
+        **{kind: MANIFEST[key] for key, kind in KIND_KEYS.items()},
+    }
+    by_merchant = k1.details["by_merchant"]
+    assert isinstance(by_merchant, dict)
+    assert sorted(by_merchant) == ["Lyft", "Uber"]
+    assert by_merchant["Lyft"]["driver_earnings"] == 1
+    assert by_merchant["Uber"]["food_order"] == 2
+    assert (k1.n_failed, k1.n_evaluated) == (MANIFEST["K1.non_spend"], N_ROWS)
+    # No injected subject is an unknown template.
+    assert by_id["K2"].n_failed == 0
+    assert by_id["K2"].details["templates"] == []
+
+
+def test_v2_flags_exactly_the_manifest_rows(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    v2 = next(
+        r for r in run_checks(full_synthetic_derived.lazy()) if r.check_id == "V2"
+    )
+    assert not v2.passed
+    assert v2.n_failed == MANIFEST["V2"]
+    assert v2.sample is not None
+    assert sorted(v2.sample["receipt_kind"].cast(pl.String).to_list()) == [
+        "driver_earnings",
+        "food_order",
+        "food_order",
+        "freight",
+    ]
+
+
+def test_a1_fails_only_the_negative_car_ride(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    a1 = next(
+        r for r in run_checks(full_synthetic_derived.lazy()) if r.check_id == "A1"
+    )
+    assert a1.n_failed == MANIFEST["A1"] == 1
+    assert a1.sample is not None
+    assert a1.sample["order_total_amount"].to_list() == [-5.75]
+    # The bike's negative total is not counted: it isn't rider spend.
+    (bike,) = INJECTIONS["bike"]
+    assert full_synthetic_derived["order_total_amount"][bike] < 0
+    assert not full_synthetic_derived["is_rider_spend"][bike]
+    assert a1.n_evaluated == full_synthetic_derived["is_rider_spend"].sum()
 
 
 def test_degenerate_columns_are_the_documented_ones(
-    full_synthetic_frame: pl.DataFrame,
+    full_synthetic_derived: pl.DataFrame,
 ) -> None:
-    by_id = {r.check_id: r for r in run_checks(full_synthetic_frame.lazy())}
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    # The derived columns are not part of the delivered file's profile.
     assert by_id["S4"].details["columns"] == list(ALL_NULL)
     assert by_id["S5"].details["columns"] == list(CONSTANT)
 
@@ -209,7 +297,7 @@ def test_cli_end_to_end_on_the_full_fixture(
     full_synthetic_csv: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     out = tmp_path / "out"
-    # The bike's negative total fails A1, an error check, so the run exits 1.
+    # The negative car ride fails A1, an error check, so the run exits 1.
     assert qc_main(["run", "--input", str(full_synthetic_csv), "--out", str(out)]) == 1
 
     summary, checks, _outcome = capsys.readouterr().out.split("\n\n")
@@ -226,12 +314,20 @@ def test_cli_end_to_end_on_the_full_fixture(
         "cast_failures",
         "non_negative_total",
         "checksum_unique",
+        "category_mismatch",
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
+        "receipt_kinds",
+        "unclassified_subject_templates",
     ]
     assert lines["non_negative_total"][1] == "FAIL"
-    assert lines["non_negative_total"][3] == f"{MANIFEST['A1']}/{N_ROWS}"
+    spend = N_ROWS - MANIFEST["K1.non_spend"]
+    assert lines["non_negative_total"][3] == f"{MANIFEST['A1']}/{spend}"
+    assert lines["category_mismatch"][1] == "FAIL"
+    assert lines["category_mismatch"][3] == f"{MANIFEST['V2']}/{N_ROWS}"
+    assert lines["receipt_kinds"][3] == f"{MANIFEST['K1.non_spend']}/{N_ROWS}"
+    assert lines["unclassified_subject_templates"][3] == f"0/{N_ROWS}"
     for name in ("cast_failures", "checksum_unique", "duplicate_rows"):
         assert lines[name][1] == "PASS"
         assert lines[name][3].startswith("0/")

@@ -11,6 +11,7 @@ from typing import NamedTuple
 lazy import polars as pl
 
 from rideshare_data_pipeline.checks.model import CheckResult, DatasetCheck, Severity
+from rideshare_data_pipeline.parse import input_columns
 
 
 class DegenerateColumns(NamedTuple):
@@ -103,6 +104,7 @@ def _info(
 
 def all_null_columns_check(lf: pl.LazyFrame) -> CheckResult:
     """S4: the all-null columns, as an info result (see degenerate_columns)."""
+    lf = input_columns(lf)
     found = degenerate_columns(lf).all_null
     return _info(
         "all_null_columns",
@@ -115,6 +117,7 @@ def all_null_columns_check(lf: pl.LazyFrame) -> CheckResult:
 
 def constant_columns_check(lf: pl.LazyFrame) -> CheckResult:
     """S5: the constant columns, as an info result (see degenerate_columns)."""
+    lf = input_columns(lf)
     found = degenerate_columns(lf).constant
     return _info(
         "constant_columns",
@@ -128,8 +131,10 @@ def constant_columns_check(lf: pl.LazyFrame) -> CheckResult:
 def duplicate_rows_check(lf: pl.LazyFrame) -> CheckResult:
     """An error result counting exact duplicate rows (see duplicate_row_count).
 
-    n_evaluated is the row count, which costs a second (cheap) pass.
+    n_evaluated is the row count, which costs a second (cheap) pass. Derived
+    columns (parse.derived_columns) don't take part in the comparison.
     """
+    lf = input_columns(lf)
     n_failed = duplicate_row_count(lf)
     n_rows = lf.select(pl.len()).collect(engine="streaming").item()
     return CheckResult(

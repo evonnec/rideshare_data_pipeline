@@ -13,7 +13,7 @@ from collections.abc import Iterable, Sequence
 
 lazy import polars as pl
 
-from rideshare_data_pipeline.checks import arithmetic, structural, uniqueness
+from rideshare_data_pipeline.checks import arithmetic, kinds, structural, uniqueness
 from rideshare_data_pipeline.checks.model import (
     SAMPLE_LIMIT,
     CheckResult,
@@ -33,12 +33,12 @@ __all__ = [
 
 def default_rules() -> tuple[RowRule, ...]:
     """Return every registered row rule."""
-    return (*arithmetic.rules(), *uniqueness.rules())
+    return (*arithmetic.rules(), *uniqueness.rules(), *kinds.rules())
 
 
 def default_dataset_checks() -> tuple[DatasetCheck, ...]:
     """Return every registered dataset check."""
-    return structural.dataset_checks()
+    return (*structural.dataset_checks(), *kinds.dataset_checks())
 
 
 def _fails(rule: RowRule) -> pl.Expr:
@@ -46,9 +46,15 @@ def _fails(rule: RowRule) -> pl.Expr:
 
     A null predicate means "can't tell", which is not a failure (a missing value
     is a completeness question, not an arithmetic one); fill_null makes that rule
-    explicit so it doesn't depend on how `&` treats nulls.
+    explicit so it doesn't depend on how `&` treats nulls. This is also the filter
+    of the sample query, so it holds no length-broadcast literal (``pl.repeat``,
+    as `_applies` does): that combined with ``head`` made the streaming engine
+    panic now and then.
     """
-    return _applies(rule) & rule.predicate.fill_null(False)
+    failed = rule.predicate.fill_null(False)
+    if rule.applies_to is not None:
+        failed = failed & rule.applies_to.fill_null(False)
+    return failed
 
 
 def _applies(rule: RowRule) -> pl.Expr:
