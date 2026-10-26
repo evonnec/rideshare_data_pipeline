@@ -133,6 +133,11 @@ def test_configure_rules_replaces_and_drops() -> None:
         "category_mismatch",
         "merchant_sender_consistent",
         "unknown_sender",
+        "ingestion_order",
+        "order_before_receipt",
+        "late_receipts",
+        "order_before_window",
+        "email_after_update",
     ]
     assert rules["non_negative_total"].max_failed_rate == 0.5
     assert rules["non_negative_total"].severity is Severity.WARN

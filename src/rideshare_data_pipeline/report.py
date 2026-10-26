@@ -606,6 +606,93 @@ def _parsing_section(results: Sequence[CheckResult]) -> list[str]:
     return ["_Not available: the description_parse_coverage check is disabled._", ""]
 
 
+def _by_field(results: Sequence[CheckResult], name: str) -> dict[str, int] | None:
+    """The ``by_field`` counts of check `name`, or None when it didn't run."""
+    for r in results:
+        if r.name == name:
+            raw = r.details.get("by_field")
+            if isinstance(raw, dict):
+                return {str(k): v for k, v in raw.items() if isinstance(v, int)}
+    return None
+
+
+def _time_section(results: Sequence[CheckResult], run: RunInfo) -> list[str]:
+    """The "Time" section body: window, T2 tolerance, T3 lateness, date-only shares."""
+    window = f"{run.window_start} to {run.window_end}" if run.window_start else "n/a"
+    out = [
+        "`order_time` is read as the trip's local time and `email_time` as UTC, so "
+        "the checks compare dates, not instants (see the README, Assumptions). "
+        f"Email window: {window}.",
+        "",
+    ]
+    by_name = {r.name: r for r in results}
+    t2, t3 = by_name.get("order_before_receipt"), by_name.get("late_receipts")
+    t2f = _by_field(results, "order_before_receipt") or {}
+    t3f = _by_field(results, "late_receipts") or {}
+    rows: list[list[str]] = []
+    if t2 is not None:
+        rows.append(
+            [
+                "order date after email date + 1 day (T2, error)",
+                f"{t2.n_failed:,}",
+            ]
+        )
+        rows.append(
+            [
+                "order time after email time, no tolerance",
+                f"{t2f.get('order_after_email_no_tolerance', 0):,}",
+            ]
+        )
+    if t3 is not None:
+        rows.append(["email more than 7 days after the order (T3)", f"{t3.n_failed:,}"])
+        rows.append(
+            [
+                "email more than 30 days after the order",
+                f"{t3f.get('over_30_days', 0):,}",
+            ]
+        )
+    if rows:
+        out += _table(["time check", "rows"], rows, right=(1,))
+        out.append("")
+    if t2 is not None:
+        out += [
+            "The T2 tolerance is one day: a trip in a zone east of UTC can be on the "
+            "next calendar day locally while its UTC receipt is still on the previous "
+            "one. The no-tolerance row is the evidence for the local-vs-UTC "
+            "assumption.",
+            "",
+        ]
+    t6 = by_name.get("date_only_order_time")
+    if t6 is None:
+        out += [
+            "_Date-only shares not available: date_only_order_time is disabled._",
+            "",
+        ]
+        return out
+    merchants = t6.details.get("by_merchant")
+    if isinstance(merchants, dict) and merchants:
+        out += _table(
+            ["merchant", "order_time rows", "date only", "share"],
+            [
+                [
+                    str(name),
+                    f"{v['rows']:,}",
+                    f"{v['date_only']:,}",
+                    "n/a" if v["share"] is None else f"{v['share']:.2%}",
+                ]
+                for name, v in merchants.items()
+            ],
+            right=(1, 2, 3),
+        )
+        out += [
+            "",
+            "Date only means `order_time` is exactly midnight, read as a time that "
+            "was not recorded.",
+            "",
+        ]
+    return out
+
+
 def _sample_caption(result: CheckResult, shown: int) -> str:
     """The caption of a sample: "20 of 112 failing rows", or what the count means."""
     group_rows = result.details.get("rows")
@@ -671,6 +758,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out += _arithmetic_section(results)
     out += ["## Description parsing", ""]
     out += _parsing_section(results)
+    out += ["## Time", ""]
+    out += _time_section(results, run)
     out += ["## Column profile", ""]
     all_null = _columns(results, "all_null_columns")
     constant = _columns(results, "constant_columns")

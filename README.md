@@ -206,6 +206,31 @@ The residual is `total - (subtotal + tax - discount)`. Nulls: A2, A4 and A5 skip
 
 Zero-total rides stay in spend sums, but they are not fares: per-ride averages and the outlier baselines (#20) must use `money.positive_usd_rides` (`order_total_amount > 0`).
 
+## Temporal checks
+
+They compare the receipt's timestamps with each other, on every row (superseded rows included: they describe the delivered data, not spend). A null operand is never a failure; a rule that needs two columns applies to the rows that have both.
+
+| ID | Check | Severity | Rule |
+| --- | --- | --- | --- |
+| T1 | `ingestion_order` | error | `insert_time <= update_time <= source_dttimestamp <= dttimestamp` (per-link counts in `details.by_field`) |
+| T2 | `order_before_receipt` | error | `date(order_time) <= date(email_time) + 1 day`; `details.by_field.order_after_email_no_tolerance` counts `order_time > email_time` |
+| T3 | `late_receipts` | warn | the email date is at most 7 days after the order date; `details.by_field.over_30_days` counts those more than 30 days late |
+| T4 | `order_before_window` | warn | `order_time` is not more than 7 days before the window start (the earliest `email_time` date of the frame) |
+| T5 | `email_after_update` | warn | `email_time <= update_time` |
+| T6 | `date_only_order_time` | info | per merchant, the share of `order_time` values at exactly 00:00:00.000 (`details.by_merchant`) |
+
+The 7 and 30 day thresholds and the 1 day tolerance are constants in `checks/temporal.py`, not config keys. T4 is a row rule whose predicate holds the aggregate `email_time.min()`; inside the one select that is a scalar, so it shares the single scan. The report has a "Time" section: the email window, the T2 tolerance with its no-tolerance count, the T3 counts and the date-only share per merchant. On the full real file: T1 0, T2 0 (380 without the tolerance), T3 2,757 (968 over 30 days), T4 828, T5 19, and Uber `order_time` is date-only on about 99.6% of rows.
+
+## Assumptions
+
+**Local time versus UTC.** `order_time` is the trip's local time (the rider's wall clock) and `email_time` is UTC. The evidence: the Lyft lag `email_time - order_time` is never below 4 h and peaks at 5 h and 7 h (US offsets plus a few minutes for the receipt), and every row whose `order_time` is after its `email_time` comes from a sender east of UTC (Asia-Pacific). The two columns are not on one clock, so the checks compare dates, not instants, and never a time of day. This was an owner decision, taken on that evidence.
+
+**The 1 day tolerance on T2.** A trip on the 12th in UTC+10 can be on the 11th in UTC when its receipt is sent, so the UTC date of the receipt may be one day before the local order date and no more (offsets span at most 14 h). Without the tolerance 380 real rows fail; with it none do. The report keeps the no-tolerance count visible, as the evidence for the assumption.
+
+**Upserts.** The vendor upserts receipts: an updated receipt (a tip added to a ride) is a new row that keeps the first version's `insert_time`. So `insert_time` can precede `email_time`, and that is normal. T1 orders only the vendor's own stamps and never involves `email_time`; T5 flags the opposite oddity, an email after the vendor's last update.
+
+**Date-only Uber `order_time`.** Uber `order_time` is a date at midnight on about 99.6% of rows: the time of day was not recorded. Midnight here means "time unknown", which a polars `Datetime` cannot tell from a real 00:00:00.000, so T6 reports the share (an info check, it never fails) and no check relies on the time of day.
+
 ## Configuration
 
 Defaults live in code (`QCConfig` in `config.py`); a TOML file overrides them. [`qc.example.toml`](qc.example.toml) lists every check with its default:
@@ -288,6 +313,7 @@ src/rideshare_data_pipeline/
                       the failing rules are collected in one batch
     model.py          Severity, CheckResult, RowRule, DatasetCheck
     arithmetic.py     row rules A1-A6, dataset check A7
+    temporal.py       row rules T1-T5 (timestamp order, local-vs-UTC tolerance), dataset check T6 (date-only order_time)
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
     parsing.py        description_parse_coverage (PC1)
@@ -299,7 +325,7 @@ tests/
   conftest.py         shared fixtures
   synthetic.py        synthetic rows in the real column layout; tar/zip builders
   test_schema.py  test_io.py  test_cache.py  test_checks_structural.py  test_checks_runner.py  test_cli.py
-  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py
+  test_checks_arithmetic.py  test_checks_temporal.py  test_config.py  test_report.py  test_parse.py  test_trip_parse.py  test_currency.py  test_qa_fixes.py
   test_real_data.py   opt-in (slow), runs only when RIDESHARE_QC_DATA is set
 ```
 
@@ -323,7 +349,7 @@ Planned work is tracked in the GitHub issues:
 - Data hygiene and the input contract: guarding against committing data (#6), schema, header and encoding validation (#8), hardened extraction and a Parquet cache (#17).
 - Check framework and reporting: the CheckResult model and runner (#9), a synthetic fixture generator (#10), and the JSON and Markdown report with exit codes and TOML thresholds (#11, done).
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
-- Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
+- Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19, done), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22), privacy normalization (#30), and a stakeholder summary (#31).
 - Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).
 

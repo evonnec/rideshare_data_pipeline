@@ -156,6 +156,11 @@ def test_csv_end_to_end(
         "category_mismatch",
         "merchant_sender_consistent",
         "unknown_sender",
+        "ingestion_order",
+        "order_before_receipt",
+        "late_receipts",
+        "order_before_window",
+        "email_after_update",
         "all_null_columns",
         "constant_columns",
         "duplicate_rows",
@@ -169,6 +174,7 @@ def test_csv_end_to_end(
         "near_duplicate_rides",
         "description_parse_coverage",
         "currency_suspect_rows",
+        "date_only_order_time",
     ]
     assert all(line.split()[1] == "PASS" for line in check_lines)
     found = summary(stdout)
