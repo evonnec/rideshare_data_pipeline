@@ -7,7 +7,7 @@ Markdown is built from strings, with no template or table library.
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.resources import files
 from pathlib import Path
 
@@ -26,6 +26,17 @@ type Json = dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
+class MemberInfo:
+    """The CSV extracted from an archive input (the report's ``run.member``)."""
+
+    name: str
+    sha256: str
+    size_bytes: int
+    has_bom: bool
+    line_ending: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunInfo:
     """What the report says about the run and the input, besides the checks."""
 
@@ -34,8 +45,12 @@ class RunInfo:
     """Base name only; the local path never enters a report."""
 
     sha256: str
+    """Of the file the user passed: the CSV, or the archive."""
+
     size_bytes: int
     has_bom: bool
+    """Of the CSV that was read (the archive's member, for an archive)."""
+
     line_ending: str
     rows: int
     panelists: int
@@ -47,6 +62,10 @@ class RunInfo:
     finished: str
     elapsed_seconds: float
     config: QCConfig
+    member: MemberInfo | None = None
+    """Set when the input is an archive: sha256 and size_bytes above describe the
+    archive then, and this describes the CSV inside it."""
+
     cache: str = "off"
     """"hit", "miss" or "off" (no cache directory configured)."""
 
@@ -194,6 +213,7 @@ def build_report(results: Sequence[CheckResult], run: RunInfo, code: int) -> Jso
             "input_size_bytes": run.size_bytes,
             "bom": run.has_bom,
             "line_ending": run.line_ending,
+            "member": None if run.member is None else asdict(run.member),
             "rows": run.rows,
             "panelists": run.panelists,
             "window": {"start": run.window_start, "end": run.window_end},
@@ -490,6 +510,14 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out = [
         f"# QC report: {run.input_name} ({run.sha256[:12]})",
         "",
+        *(
+            [
+                f"member: {run.member.name} ({run.member.sha256[:12]})",
+                "",
+            ]
+            if run.member
+            else []
+        ),
         f"rows {run.rows:,} · panelists {run.panelists:,} · window {window}",
         "",
         "## Summary",

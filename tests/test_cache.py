@@ -19,7 +19,7 @@ from rideshare_data_pipeline.cli import CACHE_ENV, main
 from rideshare_data_pipeline.io import CastError, InputError
 from rideshare_data_pipeline.schema import csv_schema
 
-WATCHED = ("extract_member", "inspect_csv", "read_typed", "file_sha256")
+WATCHED = ("extract_member_named", "inspect_csv", "read_typed", "file_sha256")
 
 
 @pytest.fixture
@@ -81,8 +81,8 @@ def test_second_run_is_a_hit_that_neither_reads_nor_extracts(
     assert run_cli(tmp_path, archive, "o0")[1]["run"]["cache"] == "off"
     _, off = run_cli(tmp_path, archive, "o0")
     _, miss = run_cli(tmp_path, archive, "o1", *flag)
-    assert calls["extract_member"] == 3
-    assert calls["file_sha256"] == 1  # the miss hashed the archive once
+    assert calls["extract_member_named"] == 3
+    assert calls["file_sha256"] == 3  # each uncached or missed run hashes it once
     before = calls.copy()
 
     code, hit = run_cli(tmp_path, archive, "o2", *flag)
@@ -134,8 +134,10 @@ def test_layout_and_metadata(tmp_path: Path, archive: Path) -> None:
         "sha256": sha,
     }
     assert meta["input"]["mtime_ns"] == archive.stat().st_mtime_ns
-    assert meta["csv"]["sha256"] == report["run"]["input_sha256"]
-    assert meta["csv"]["size_bytes"] == report["run"]["input_size_bytes"]
+    assert meta["csv"]["sha256"] == report["run"]["member"]["sha256"]
+    assert meta["csv"]["size_bytes"] == report["run"]["member"]["size_bytes"]
+    assert meta["csv"]["member"] == report["run"]["member"]["name"] == "Data.csv"
+    assert report["run"]["input_sha256"] == sha
     assert meta["csv"]["bom"] is False
     assert meta["csv"]["line_ending"] == "crlf"
     assert meta["rows"] == 3
@@ -183,7 +185,7 @@ def test_refresh_cache_rebuilds(
     _, report = run_cli(tmp_path, archive, "o2", *flag, "--refresh-cache")
     assert report["run"]["cache"] == "miss"
     assert calls["read_typed"] == 1
-    assert calls["extract_member"] == 1
+    assert calls["extract_member_named"] == 1
     assert run_cli(tmp_path, archive, "o3", *flag)[1]["run"]["cache"] == "hit"
 
 
@@ -253,7 +255,7 @@ def test_a_touched_input_with_the_same_bytes_hits_by_sha(
 
     assert report["run"]["cache"] == "hit"
     assert calls["file_sha256"] == 1  # hashed, because the stat no longer matched
-    assert calls["read_typed"] == calls["extract_member"] == 0
+    assert calls["read_typed"] == calls["extract_member_named"] == 0
     run_cli(tmp_path, archive, "o3", *flag)
     assert calls["file_sha256"] == 1  # the index now knows the new mtime
 
@@ -429,3 +431,15 @@ def test_without_a_cache_nothing_is_written_outside_out(
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([*before, "out"])
     assert sorted(p.name for p in work.iterdir()) == [archive.name]
     assert list(empty_cwd.iterdir()) == []
+
+
+def test_a_hit_reproduces_the_archive_provenance(tmp_path: Path, archive: Path) -> None:
+    flag = ("--cache-dir", str(tmp_path / "c"))
+    _, miss = run_cli(tmp_path, archive, "o1", *flag)
+    _, hit = run_cli(tmp_path, archive, "o2", *flag)
+    assert hit["run"]["cache"] == "hit"
+    assert hit["run"]["member"] == miss["run"]["member"]
+    assert (
+        hit["run"]["input_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    )
+    assert hit["run"]["input_size_bytes"] == archive.stat().st_size

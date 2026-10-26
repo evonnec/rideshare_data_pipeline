@@ -1,9 +1,12 @@
 """The rideshare-qc command: arguments, summary, output and exit codes."""
 
+import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -472,3 +475,114 @@ def test_nothing_is_written_to_the_cwd_in_any_mode(
     assert list(private_tmp.iterdir()) == []
     assert cache.exists() == (mode != "no-cache")
     assert sorted(p.name for p in source.parent.iterdir()) == [name]
+
+
+# --- archive provenance and archive failures ------------------------------------------
+
+
+def test_archive_report_describes_the_archive_and_names_the_member(
+    synthetic_csv: Path, tmp_path: Path
+) -> None:
+    csv_bytes = synthetic_csv.read_bytes()
+    archive = make_tar(tmp_path / "Data.tar.gz", {"export/Data.csv": csv_bytes})
+    out = tmp_path / "out"
+    assert main(["run", "--input", str(archive), "--out", str(out)]) == 0
+
+    run = json.loads((out / "report.json").read_text())["run"]
+
+    assert run["input_name"] == "Data.tar.gz"
+    assert run["input_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert run["input_size_bytes"] == archive.stat().st_size
+    assert run["member"] == {
+        "name": "export/Data.csv",
+        "sha256": hashlib.sha256(csv_bytes).hexdigest(),
+        "size_bytes": len(csv_bytes),
+        "has_bom": False,
+        "line_ending": "crlf",
+    }
+    markdown = (out / "report.md").read_text()
+    assert f"member: export/Data.csv ({run['member']['sha256'][:12]})" in markdown
+
+
+def test_csv_report_has_a_null_member(synthetic_csv: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    assert main(["run", "--input", str(synthetic_csv), "--out", str(out)]) == 0
+    assert json.loads((out / "report.json").read_text())["run"]["member"] is None
+    assert "member:" not in (out / "report.md").read_text()
+
+
+def test_stage_errors_name_the_member_not_data_csv(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    archive = make_tar(tmp_path / "in.tar.bz2", {"export/Data.csv": b""})
+    assert main(["run", "--input", str(archive), "--out", str(tmp_path / "o")]) == 2
+    err = capsys.readouterr().err
+    assert "export/Data.csv is empty" in err
+    assert "data.csv" not in err
+
+
+def _truncated(kind: str, tmp_path: Path, csv_bytes: bytes) -> Path:
+    payload = os.urandom(200_000)  # incompressible, so cutting it hurts
+    path = make_tar(tmp_path / f"cut{kind}", {"Data.csv": csv_bytes + payload})
+    path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
+    return path
+
+
+def _corrupt_zip(tmp_path: Path, csv_bytes: bytes) -> Path:
+    path = make_zip(tmp_path / "bad.zip", {"Data.csv": csv_bytes})
+    data = bytearray(path.read_bytes())
+    data[len(data) // 2 :] = b"\xff" * (len(data) - len(data) // 2)
+    path.write_bytes(bytes(data))
+    return path
+
+
+def _encrypted_zip(tmp_path: Path, csv_bytes: bytes) -> Path:
+    path = make_zip(tmp_path / "locked.zip", {"Data.csv": csv_bytes})
+    data = bytearray(path.read_bytes())
+    # Set the "encrypted" bit in the local and the central header (the data needn't
+    # be real: the member is refused before it is read).
+    for signature, offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        data[data.index(signature) + offset] |= 0x1
+    path.write_bytes(bytes(data))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("make", "message"),
+    [
+        (lambda p, b: _truncated(".tar.bz2", p, b), "truncated or corrupt"),
+        (lambda p, b: _truncated(".tar.gz", p, b), "truncated or corrupt"),
+        (lambda p, b: _truncated(".tar.xz", p, b), "truncated or corrupt"),
+        (_corrupt_zip, "truncated or corrupt"),
+        (_encrypted_zip, "encrypted zip members are not supported"),
+    ],
+    ids=["tar.bz2", "tar.gz", "tar.xz", "zip-corrupt", "zip-encrypted"],
+)
+def test_damaged_archives_exit_2_and_write_nothing(
+    make: Callable[[Path, bytes], Path],
+    message: str,
+    synthetic_csv: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    archive = make(tmp_path, synthetic_csv.read_bytes())
+    out = tmp_path / "out"
+    assert main(["run", "--input", str(archive), "--out", str(out)]) == 2
+    assert message in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_a_zip_member_that_raises_runtime_error_is_an_encrypted_member(
+    synthetic_csv: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    archive = make_zip(tmp_path / "a.zip", {"Data.csv": synthetic_csv.read_bytes()})
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("File 'Data.csv' is encrypted, password required")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", refuse)
+    assert main(["run", "--input", str(archive), "--out", str(tmp_path / "o")]) == 2
+    assert "encrypted zip members are not supported" in capsys.readouterr().err

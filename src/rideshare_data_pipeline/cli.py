@@ -37,6 +37,7 @@ from rideshare_data_pipeline.io import (
 )
 from rideshare_data_pipeline.parse import with_derived
 from rideshare_data_pipeline.report import (
+    MemberInfo,
     RunInfo,
     Written,
     exit_code,
@@ -248,11 +249,20 @@ def run(
 
     code = exit_code(results, config.fail_on)
     window = df["email_time"]
+    member = None
+    if loaded.member is not None:
+        member = MemberInfo(
+            loaded.member,
+            facts.sha256,
+            facts.size_bytes,
+            facts.has_bom,
+            facts.line_ending,
+        )
     info = RunInfo(
         tool_version=__version__,
         input_name=Path(input_path).name,
-        sha256=facts.sha256,
-        size_bytes=facts.size_bytes,
+        sha256=loaded.input_sha256,
+        size_bytes=loaded.input_size_bytes,
         has_bom=facts.has_bom,
         line_ending=facts.line_ending,
         rows=df.height,
@@ -263,6 +273,7 @@ def run(
         finished=_utc_now(),
         elapsed_seconds=time.perf_counter() - clock,
         config=config,
+        member=member,
         cache=loaded.cache,
     )
     written = write_report(out_dir, results, info, code)

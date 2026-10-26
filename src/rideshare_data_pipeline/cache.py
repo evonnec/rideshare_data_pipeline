@@ -41,7 +41,7 @@ from rideshare_data_pipeline.schema import (
     csv_schema,
 )
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 """Bump when the layout of an entry or of index.json changes."""
 
 DATA_FILE = "data.parquet"
@@ -60,7 +60,15 @@ class Loaded:
 
     df: Frame
     facts: rio.FileFacts
+    """Of the CSV that was read: the input itself, or the archive's member."""
+
     cache: CacheStatus
+    input_size_bytes: int
+    """Of the file the user passed (the archive, or the CSV)."""
+
+    input_sha256: str
+    member: str | None
+    """The CSV's base name inside the archive; None when the input is a CSV."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +182,12 @@ def _try_load(cache_dir: Path, sha256: str) -> Loaded | None:
             line_ending=ending,
             header=EXPECTED_COLUMNS,
         )
+        member = csv["member"]
+        if member is not None and not isinstance(member, str):
+            msg = "bad member name"
+            raise ValueError(msg)
+        input_size = int(meta["input"]["size_bytes"])
+        input_sha = str(meta["input"]["sha256"])
         df = pl.read_parquet(entry / DATA_FILE)
         if df.schema != csv_schema() or df.height != int(meta["rows"]):
             msg = "the Parquet doesn't match the recorded schema or row count"
@@ -181,7 +195,7 @@ def _try_load(cache_dir: Path, sha256: str) -> Loaded | None:
     except (OSError, ValueError, KeyError, TypeError, pl.exceptions.PolarsError) as err:
         _warn(f"rebuilding unreadable cache entry {entry}: {err}")
         return None
-    return Loaded(df, facts, "hit")
+    return Loaded(df, facts, "hit", input_size, input_sha, member)
 
 
 def _install(tmp: Path, final: Path) -> None:
@@ -203,9 +217,7 @@ def _install(tmp: Path, final: Path) -> None:
             shutil.rmtree(old, ignore_errors=True)
 
 
-def _store(
-    cache_dir: Path, source: _Source, df: pl.DataFrame, facts: rio.FileFacts
-) -> None:
+def _store(cache_dir: Path, source: _Source, loaded: Loaded) -> None:
     """Write the entry atomically (temporary directory, then rename) and index it.
 
     write_parquet from the collected frame: it's already in memory, while a
@@ -215,6 +227,7 @@ def _store(
     tmp = cache_dir / f"{source.sha256}.tmp-{os.getpid()}"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
+    df, facts = loaded.df, loaded.facts
     meta = {
         "format_version": FORMAT_VERSION,
         "tool_version": __version__,
@@ -226,6 +239,7 @@ def _store(
             "sha256": source.sha256,
         },
         "csv": {
+            "member": loaded.member,
             "size_bytes": facts.size_bytes,
             "sha256": facts.sha256,
             "bom": facts.has_bom,
@@ -243,10 +257,18 @@ def _store(
     _update_index(cache_dir, source)
 
 
-def _read(path: Path, status: CacheStatus) -> Loaded:
-    with rio.input_csv(path) as csv_path:
-        df, facts = rio.read_typed(csv_path)
-    return Loaded(df, facts, status)
+def _read(path: Path, status: CacheStatus, sha256: str | None = None) -> Loaded:
+    """Extract (for an archive), validate, read and cast; describe the input.
+
+    An archive is hashed here (one pass over its bytes) unless the caller already
+    has the hash; for a CSV the input's size and hash are the CSV's own.
+    """
+    with rio.open_input(path) as (csv_path, member):
+        df, facts = rio.read_typed(csv_path, member)
+    if member is None:
+        return Loaded(df, facts, status, facts.size_bytes, facts.sha256, None)
+    sha256 = sha256 or rio.file_sha256(path)
+    return Loaded(df, facts, status, path.stat().st_size, sha256, member)
 
 
 def load_typed(
@@ -288,9 +310,9 @@ def load_typed(
         except OSError as err:
             _warn(f"can't update the cache index in {cache}: {err}")
         return loaded
-    loaded = _read(path, "miss")
+    loaded = _read(path, "miss", sha256)
     try:
-        _store(cache, source, loaded.df, loaded.facts)
+        _store(cache, source, loaded)
     except (OSError, pl.exceptions.PolarsError) as err:
         _warn(f"cache not written to {cache}: {err}")
     return loaded

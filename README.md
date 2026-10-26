@@ -78,6 +78,8 @@ An archive (`.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` or `.zip`) must hold exactl
 - Directories and macOS AppleDouble sidecars (`._*`, also under `__MACOSX/`) are ignored.
 - No CSV, or more than one, raises `ArchiveError` (exit 2), and the message lists the members (at most 20, then "and N more").
 - The CSV member is rejected if it is a symlink, a hardlink or any non-regular file, or if its name is absolute or has a `..` component.
+- A truncated or corrupt archive, or an encrypted zip member, is also an `ArchiveError` (exit 2, never a crash): "archive is truncated or corrupt: ..." or "encrypted zip members are not supported".
+- Error messages about the CSV name the member's path inside the archive, not the temporary file.
 - A tar is read in one sequential pass (a listing of a compressed tar means decompressing it, and seeking back would decompress it again).
 
 ## Cache
@@ -87,7 +89,8 @@ Decompressing the bz2 sample takes about 20 s per run. With a cache directory, t
 ```text
 <cache>/<sha256 of the input file as given>/data.parquet   the typed frame (zstd)
 <cache>/<sha256 of the input file as given>/meta.json      format version, tool version, schema fingerprint,
-                                                           input name/size/mtime_ns/sha256, the CSV's size,
+                                                           input name/size/mtime_ns/sha256, the CSV's member
+                                                           name (null for a CSV input), size,
                                                            sha256, BOM and line endings, row count, created
 <cache>/index.json                                         resolved path -> size, mtime_ns, sha256
 ```
@@ -184,13 +187,14 @@ Unknown keys and unknown check names are errors (exit 2), so a typo can't silent
 
 ## Report
 
-`report.md` has a title with the input name and the first 12 characters of its SHA-256, a one-line run summary (rows, panelists, window), the counts, a table of every check (sorted by severity, failures first) with its failed count, rate, threshold and rule, a column profile, and the failing-row samples (at most `sample_limit` rows per check, linked to the Parquet file). The "Composition by receipt kind" section is a merchant x kind table with a total column and a rider-spend marker per kind.
+`report.md` has a title with the input name and the first 12 characters of its SHA-256 (of the archive, for an archive; a `member: <path> (<sha256[:12]>)` line for the CSV inside it follows), a one-line run summary (rows, panelists, window), the counts, a table of every check (sorted by severity, failures first) with its failed count, rate, threshold and rule, a column profile, and the failing-row samples (at most `sample_limit` rows per check, linked to the Parquet file). The "Composition by receipt kind" section is a merchant x kind table with a total column and a rider-spend marker per kind.
 
 `report.json` is documented by the JSON Schema (draft 2020-12) in [`src/rideshare_data_pipeline/report.schema.json`](src/rideshare_data_pipeline/report.schema.json), which a test validates a real run against:
 
 ```text
 {"schema_version": 1,
- "run": {tool_version, input_name (base name), input_sha256, input_size_bytes, bom, line_ending,
+ "run": {tool_version, input_name (base name), input_sha256, input_size_bytes (of the file passed: the CSV or the archive),
+         bom, line_ending (of the CSV read), member (null, or for an archive {name (path inside it), sha256, size_bytes, has_bom, line_ending}),
          rows, panelists (distinct user_id), window {start, end} (email_time, ISO), started, finished,
          elapsed_seconds, cache (hit|miss|off), config {fail_on, sample_limit, checks {<name>: {threshold, severity}}}},
  "summary": {errors_failed, warnings_failed, info, passed, total},

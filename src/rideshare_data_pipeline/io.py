@@ -16,10 +16,12 @@ lazy import codecs
 lazy import csv
 lazy import fnmatch
 lazy import hashlib
+lazy import lzma
 lazy import shutil
 lazy import stat
 lazy import tarfile
 lazy import tempfile
+lazy import zlib
 lazy from zipfile import BadZipFile, ZipFile, ZipInfo
 
 lazy import polars as pl
@@ -135,8 +137,8 @@ def _settle(
     chosen: Sequence[str],
     problem: str | None,
     target: Path,
-) -> Path:
-    """Turn what the listing found into the extracted path, or an ArchiveError."""
+) -> tuple[Path, str]:
+    """Turn what the listing found into (extracted path, member), or an ArchiveError."""
     if len(chosen) != 1:
         target.unlink(missing_ok=True)
         if chosen:
@@ -148,7 +150,7 @@ def _settle(
     if problem is not None:
         msg = f"unsafe member {chosen[0]!r} in {archive.name}: {problem}"
         raise ArchiveError(msg)
-    return target
+    return target, chosen[0]
 
 
 def _tar_problem(info: tarfile.TarInfo) -> str | None:
@@ -162,7 +164,7 @@ def _tar_problem(info: tarfile.TarInfo) -> str | None:
     return None if unsafe is None else f"{unsafe}"
 
 
-def _extract_tar_member(archive: Path, dest: Path, pattern: str) -> Path:
+def _extract_tar_member(archive: Path, dest: Path, pattern: str) -> tuple[Path, str]:
     # One sequential pass: listing a compressed tar means decompressing it, and
     # seeking back to a member afterwards would decompress it all over again. So the
     # first match is written as it goes by, and a second one discards it.
@@ -188,23 +190,65 @@ def _extract_tar_member(archive: Path, dest: Path, pattern: str) -> Path:
 
 
 def _zip_problem(info: ZipInfo) -> str | None:
+    if info.flag_bits & 0x1:
+        return "encrypted"
     if stat.S_ISLNK(info.external_attr >> 16):
         return "a symlink"
     return _unsafe_name(info.filename)
 
 
-def _extract_zip_member(archive: Path, dest: Path, pattern: str) -> Path:
+def _extract_zip_member(archive: Path, dest: Path, pattern: str) -> tuple[Path, str]:
     target = dest / EXTRACTED_NAME
     with ZipFile(archive) as zip_file:
         infos = [i for i in zip_file.infolist() if not i.is_dir()]
         names = [i.filename for i in infos]
         picked = [i for i in infos if _wanted(i.filename, pattern)]
         problem = _zip_problem(picked[0]) if picked else None
+        if problem == "encrypted":
+            msg = (
+                f"can't extract {archive.name}: encrypted zip members are not supported"
+            )
+            raise ArchiveError(msg)
         if len(picked) == 1 and problem is None:
             _copy_to(zip_file.open(picked[0]), target)
     return _settle(
         archive, pattern, names, [i.filename for i in picked], problem, target
     )
+
+
+def extract_member_named(
+    archive: StrPath, dest: StrPath, member: str = "*.csv"
+) -> tuple[Path, str]:
+    """Like extract_member, but also return the member's name inside the archive."""
+    archive, dest = Path(archive), Path(dest)
+    _, kind = _split_input_name(archive)
+    if kind == "csv":
+        msg = f"{archive.name} is a CSV, not an archive"
+        raise InputError(msg)
+    try:
+        if kind == "tar":
+            return _extract_tar_member(archive, dest, member)
+        return _extract_zip_member(archive, dest, member)
+    except RuntimeError as err:
+        # zipfile reports an encrypted member this way.
+        what = (
+            "encrypted zip members are not supported"
+            if "encrypted" in str(err)
+            else f"archive is truncated or corrupt: {err}"
+        )
+        msg = f"can't extract {archive.name}: {what}"
+        raise ArchiveError(msg) from err
+    except (
+        tarfile.TarError,
+        BadZipFile,
+        EOFError,
+        OSError,
+        zlib.error,
+        lzma.LZMAError,
+        NotImplementedError,
+    ) as err:
+        msg = f"can't extract {archive.name}: archive is truncated or corrupt: {err}"
+        raise ArchiveError(msg) from err
 
 
 def extract_member(archive: StrPath, dest: StrPath, member: str = "*.csv") -> Path:
@@ -218,21 +262,12 @@ def extract_member(archive: StrPath, dest: StrPath, member: str = "*.csv") -> Pa
 
     The bytes are streamed to ``dest/data.csv`` (see EXTRACTED_NAME), a fixed name
     chosen here, rather than extracted under the member's own path: so there is
-    no path to escape by, and tarfile's extraction filters aren't needed. A
-    damaged archive raises InputError.
+    no path to escape by, and tarfile's extraction filters aren't needed. Every
+    failure to open, list or read the archive (truncated, corrupt, an encrypted
+    zip member) is an ArchiveError, so a damaged archive is an input error
+    (exit 2), never a crash.
     """
-    archive, dest = Path(archive), Path(dest)
-    _, kind = _split_input_name(archive)
-    if kind == "csv":
-        msg = f"{archive.name} is a CSV, not an archive"
-        raise InputError(msg)
-    try:
-        if kind == "tar":
-            return _extract_tar_member(archive, dest, member)
-        return _extract_zip_member(archive, dest, member)
-    except (tarfile.TarError, BadZipFile, EOFError) as err:
-        msg = f"can't extract {archive.name}: {err}"
-        raise InputError(msg) from err
+    return extract_member_named(archive, dest, member)[0]
 
 
 def validate_input(path: StrPath) -> InputKind:
@@ -246,20 +281,29 @@ def validate_input(path: StrPath) -> InputKind:
 
 
 @contextmanager
-def input_csv(path: StrPath) -> Iterator[Path]:
-    """Yield the CSV to read for `path`, a CSV file or an archive holding one.
+def open_input(path: StrPath) -> Iterator[tuple[Path, str | None]]:
+    """Yield (the CSV to read, its member name) for `path`, a CSV or an archive.
 
-    A CSV is yielded as is. An archive's one CSV (see extract_member) is extracted
-    into a new temporary directory, which is removed, with everything in it, when
-    the block exits; nothing is written next to the input or to the working
+    A CSV is yielded as is, with no member name. An archive's one CSV (see
+    extract_member) is extracted into a new temporary directory, which is removed,
+    with everything in it, when the block exits; the member name is its path
+    inside the archive. Nothing is written next to the input or to the working
     directory. Raises InputError if `path` isn't a file or isn't a supported input.
     """
     path = Path(path)
     if validate_input(path) == "csv":
-        yield path
+        yield path, None
         return
     with tempfile.TemporaryDirectory(prefix="rideshare-qc-") as tmp:
-        yield extract_member(path, tmp)
+        csv_path, name = extract_member_named(path, tmp)
+        yield csv_path, name
+
+
+@contextmanager
+def input_csv(path: StrPath) -> Iterator[Path]:
+    """Yield the CSV to read for `path`; see open_input."""
+    with open_input(path) as (csv_path, _):
+        yield csv_path
 
 
 class HeaderError(InputError):
@@ -348,7 +392,9 @@ def _line_ending(*, crlf: int, bare_lf: int) -> LineEnding:
     return "crlf" if crlf else "lf"
 
 
-def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
+def _scan_bytes(
+    path: Path, name: str | None = None
+) -> tuple[int, str, bool, LineEnding]:
     """Validate the file as UTF-8 in one streaming pass and describe its bytes.
 
     Returns the size, the SHA-256 (hex), whether it starts with a BOM, and the
@@ -380,7 +426,8 @@ def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
                     if err.reason.startswith("unexpected end")
                     else "invalid byte"
                 )
-                msg = f"{path.name} isn't valid UTF-8: {what} at byte offset {offset:,}"
+                shown = name or path.name
+                msg = f"{shown} isn't valid UTF-8: {what} at byte offset {offset:,}"
                 raise EncodingError(msg, offset=offset) from err
             if final:
                 break
@@ -395,7 +442,7 @@ def _scan_bytes(path: Path) -> tuple[int, str, bool, LineEnding]:
     return position, digest.hexdigest(), has_bom, ending
 
 
-def _read_header(path: Path) -> tuple[str, ...]:
+def _read_header(path: Path, name: str | None = None) -> tuple[str, ...]:
     """Parse the first record as CSV (so a quoted comma stays in its name).
 
     Raises InputError if the file has no content. utf-8-sig drops any BOM.
@@ -403,7 +450,7 @@ def _read_header(path: Path) -> tuple[str, ...]:
     with path.open(encoding="utf-8-sig", newline="") as f:
         first = next(csv.reader(f), None)
     if first is None:
-        msg = f"{path.name} is empty"
+        msg = f"{name or path.name} is empty"
         raise InputError(msg)
     return tuple(first)
 
@@ -452,7 +499,7 @@ def check_header(header: Sequence[str]) -> None:
         )
 
 
-def inspect_csv(path: StrPath) -> FileFacts:
+def inspect_csv(path: StrPath, name: str | None = None) -> FileFacts:
     """Validate the file's encoding and header; return what the bytes looked like.
 
     Reads the whole file once for UTF-8 validity (about a second per GB), then the
@@ -460,8 +507,8 @@ def inspect_csv(path: StrPath) -> FileFacts:
     for an empty file.
     """
     path = Path(path)
-    size, sha256, has_bom, line_ending = _scan_bytes(path)
-    header = _read_header(path)
+    size, sha256, has_bom, line_ending = _scan_bytes(path, name)
+    header = _read_header(path, name)
     check_header(header)
     return FileFacts(size, sha256, has_bom, line_ending, header)
 
@@ -511,7 +558,9 @@ def _first_line(err: Exception) -> str:
     return str(err).partition("\n")[0]
 
 
-def read_typed(path: StrPath) -> tuple[pl.DataFrame, FileFacts]:
+def read_typed(
+    path: StrPath, name: str | None = None
+) -> tuple[pl.DataFrame, FileFacts]:
     """Validate the CSV, then read it into a DataFrame with the schema's dtypes.
 
     The raw frame is scanned twice, both times streaming: once to count cast
@@ -519,8 +568,8 @@ def read_typed(path: StrPath) -> tuple[pl.DataFrame, FileFacts]:
     and collect. Raises InputError (or a subclass) for anything wrong with the
     file; returns the frame and the byte-level facts.
     """
-    name = Path(path).name
-    facts = inspect_csv(path)
+    name = name or Path(path).name
+    facts = inspect_csv(path, name)
     raw = read_raw(path, inspected=facts)
     try:
         failures = {col: n for col, n in cast_failures(raw).items() if n}
