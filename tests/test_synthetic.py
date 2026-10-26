@@ -224,6 +224,12 @@ def test_implemented_checks_match_the_manifest(
             "C3",
             "S6",
             "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6",
+            "A7",
             "U1",
             "S4",
             "S5",
@@ -443,6 +449,51 @@ def test_a1_fails_only_the_negative_car_ride(
     assert a1.n_evaluated == full_synthetic_derived["is_rider_spend"].sum()
 
 
+def test_arithmetic_checks_hit_their_injections_and_nothing_else(
+    full_synthetic_derived: pl.DataFrame,
+) -> None:
+    by_id = {r.check_id: r for r in run_checks(full_synthetic_derived.lazy())}
+    d = full_synthetic_derived
+    for check_id, key in (
+        ("A2", "A2"),
+        ("A3", "A3"),
+        ("A4", "A4"),
+        ("A5", "A5"),
+        ("A6", "A6"),
+    ):
+        assert by_id[check_id].n_failed == MANIFEST[key], check_id
+    assert [by_id[k].passed for k in ("A2", "A3", "A4", "A5", "A6")] == [
+        True,
+        False,
+        False,
+        False,
+        True,
+    ]
+    # Each warning fires on its own injection row.
+    for check_id, block in (
+        ("A3", "zero_fare_ride"),
+        ("A4", "discount_gt_subtotal"),
+        ("A5", "tax_gt_total"),
+    ):
+        sample = by_id[check_id].sample
+        assert sample is not None
+        (pos,) = INJECTIONS[block]
+        assert sample["checksum"].to_list() == [d["checksum"][pos]], check_id
+    assert by_id["A3"].details["by_field"] == {"Uber": 1, "Lyft": 0, "other": 0}
+    # A3 means exactly 0 (the negative ride is A1's), and A6 judges USD.rides.
+    assert by_id["A6"].n_evaluated == MANIFEST["USD.rides"]
+
+    a7 = by_id["A7"]
+    assert a7.passed
+    assert a7.n_failed == MANIFEST["A7"] == a7.details["holds"]
+    assert a7.details["population"] == MANIFEST["USD.rides"]
+    assert a7.details["holds"] == MANIFEST["A7"]
+    assert a7.details["above"] == MANIFEST["A7.above"]
+    assert a7.details["below"] == MANIFEST["A7.below"]
+    assert a7.details["not_computable"] == 0
+    assert a7.metric == MANIFEST["A7"] / MANIFEST["USD.rides"]
+
+
 def test_degenerate_columns_are_the_documented_ones(
     full_synthetic_derived: pl.DataFrame,
 ) -> None:
@@ -480,6 +531,11 @@ def test_cli_end_to_end_on_the_full_fixture(
         "required_fields",
         "id_formats",
         "non_negative_total",
+        "item_price_equals_subtotal",
+        "zero_fare_rides",
+        "discount_within_subtotal",
+        "tax_within_total",
+        "unexplained_residual",
         "checksum_unique",
         "category_mismatch",
         "merchant_sender_consistent",
@@ -488,6 +544,7 @@ def test_cli_end_to_end_on_the_full_fixture(
         "constant_columns",
         "duplicate_rows",
         "ride_completeness",
+        "identity_share",
         "receipt_kinds",
         "unclassified_subject_templates",
         "duplicate_receipts",

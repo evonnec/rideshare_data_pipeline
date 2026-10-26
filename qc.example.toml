@@ -47,6 +47,31 @@ max_failed_rate = 0.0
 severity = "error"
 enabled = true
 
+[checks.item_price_equals_subtotal]  # A2: |item_price - order_subtotal| <= 0.01 where both are present
+max_failed_rate = 0.0
+severity = "error"
+enabled = true
+
+[checks.zero_fare_rides]     # A3: ride and tip-update receipts (not superseded) with a total of exactly 0
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.discount_within_subtotal]  # A4: order_discount <= order_subtotal + 0.01 where both are present
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.tax_within_total]    # A5: order_tax <= order_total_amount + 0.01 where both are present
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
+[checks.unexplained_residual]  # A6: total - (subtotal + tax - discount) above max(20, subtotal), USD rider-spend rides
+max_failed_rate = 0.0
+severity = "warn"
+enabled = true
+
 [checks.checksum_unique]     # U1: checksum is unique
 max_failed_rate = 0.0
 severity = "error"
@@ -82,6 +107,10 @@ enabled = true
 
 [checks.ride_completeness]   # C2: rides' null rates: total <= 0.01%, order_number <= 0.5%, order_time <= 0.5%
 severity = "warn"            # (per-field limits are fixed; max_failed_rate would replace the worst field's)
+enabled = true
+
+[checks.identity_share]      # A7: share of rides where total = subtotal + tax - discount (info, no threshold)
+severity = "info"
 enabled = true
 
 [checks.receipt_kinds]       # K1: receipt kind composition (info, no threshold)

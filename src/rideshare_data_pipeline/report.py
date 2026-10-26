@@ -488,6 +488,56 @@ def _spend_section(results: Sequence[CheckResult]) -> list[str]:
     return out
 
 
+def _arithmetic_section(results: Sequence[CheckResult]) -> list[str]:
+    """The "Arithmetic" section body, from ``identity_share`` (A7)."""
+    for r in results:
+        if r.name != "identity_share":
+            continue
+        d = r.details
+        keys = ("holds", "above", "below", "not_computable", "population")
+        if not all(isinstance(d.get(k), int) for k in keys):
+            return ["_Not available._", ""]
+        pop = int(d["population"])  # type: ignore[call-overload]
+
+        def share(n: object, pop: int = pop) -> str:
+            return f"{n / pop:.2%}" if pop and isinstance(n, int) else "n/a"
+
+        gap = d.get("median_gap_above")
+        return [
+            "The identity `total = subtotal + tax - discount` over USD rider-spend "
+            "ride receipts that are not superseded (the population of the "
+            "`unexplained_residual` check). It cannot be an error rule: tips, tolls "
+            "and fees are not itemized and many credits are missing from "
+            "`order_discount`, so most rows legitimately differ. Above means the "
+            "total exceeds the itemized lines, below that it is under them; a null "
+            "tax or discount counts as 0, a null total or subtotal is not computable.",
+            "",
+            *_table(
+                ["identity (within 0.01)", "rows", "share"],
+                [
+                    ["holds", f"{d['holds']:,}", share(d["holds"])],
+                    ["total above", f"{d['above']:,}", share(d["above"])],
+                    ["total below", f"{d['below']:,}", share(d["below"])],
+                    [
+                        "not computable",
+                        f"{d['not_computable']:,}",
+                        share(d["not_computable"]),
+                    ],
+                ],
+                right=(1, 2),
+            ),
+            "",
+            f"{pop:,} rows in the population"
+            + (
+                f"; median gap where the total is above: ${gap:,.2f}."
+                if isinstance(gap, int | float)
+                else "."
+            ),
+            "",
+        ]
+    return ["_Not available: the identity_share check is disabled._", ""]
+
+
 def _parsing_section(results: Sequence[CheckResult]) -> list[str]:
     """The "Description parsing" section body, from ``description_parse_coverage``."""
     for r in results:
@@ -617,6 +667,8 @@ def render_markdown(results: Sequence[CheckResult], run: RunInfo, code: int) -> 
     out += _duplicates_section(results)
     out += ["## Spend", ""]
     out += _spend_section(results)
+    out += ["## Arithmetic", ""]
+    out += _arithmetic_section(results)
     out += ["## Description parsing", ""]
     out += _parsing_section(results)
     out += ["## Column profile", ""]

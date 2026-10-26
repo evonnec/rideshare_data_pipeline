@@ -34,6 +34,12 @@ IMPLEMENTED = (
     "C3",
     "S6",
     "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
     "U1",
     "S4",
     "S5",
@@ -47,6 +53,7 @@ IMPLEMENTED = (
     "V1",
     "V3",
 )
+ARITH_WARNS = ("zero_fare_rides", "discount_within_subtotal", "tax_within_total")
 DUPLICATE_CHECKS = (
     "id_formats",
     "currency_suspect_rows",
@@ -54,9 +61,12 @@ DUPLICATE_CHECKS = (
     "duplicate_receipts",
     "cross_panelist_duplicates",
     "near_duplicate_rides",
+    *ARITH_WARNS,
 )
 LOOSE_V2 = "[checks.category_mismatch]\nmax_failed_rate = 0.02\n" + "".join(
-    f"[checks.{name}]\nmax_failed_rate = 0.05\n" for name in DUPLICATE_CHECKS
+    # A4 and A5 fail on 1 of the 8 rows they apply to, so they need a wider band.
+    f"[checks.{name}]\nmax_failed_rate = {0.2 if name in ARITH_WARNS else 0.05}\n"
+    for name in DUPLICATE_CHECKS
 )
 
 
@@ -132,11 +142,14 @@ def test_run_writes_reports_and_samples(
     assert sorted(p.name for p in (out / "samples").iterdir()) == [
         "category_mismatch.parquet",
         "cross_panelist_duplicates.parquet",
+        "discount_within_subtotal.parquet",
         "duplicate_receipts.parquet",
         "id_formats.parquet",
         "near_duplicate_rides.parquet",
         "non_negative_total.parquet",
+        "tax_within_total.parquet",
         "unknown_sender.parquet",
+        "zero_fare_rides.parquet",
     ]
     sample = pl.read_parquet(out / "samples" / "non_negative_total.parquet")
     assert sample.height == MANIFEST["A1"]
@@ -182,10 +195,10 @@ def test_report_json_content_matches_the_manifest(
     assert report["exit_code"] == 1
     assert report["summary"] == {
         "errors_failed": 1,
-        "warnings_failed": 7,  # V2, U2, U3, U4, CUR1, V3, S6
-        "info": 4,
-        "passed": 15,
-        "total": 23,
+        "warnings_failed": 10,  # V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5
+        "info": 5,
+        "passed": 18,
+        "total": 29,
     }
     run = report["run"]
     assert isinstance(run, dict)
@@ -405,7 +418,7 @@ def test_warn_severity_and_fail_on(full_synthetic_csv: Path, tmp_path: Path) -> 
     config = '[checks.non_negative_total]\nseverity = "warn"\n'
     assert run_cli(full_synthetic_csv, tmp_path / "a", config=config) == 0
     report = load(tmp_path / "a")
-    assert report["summary"]["warnings_failed"] == 8  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6
+    assert report["summary"]["warnings_failed"] == 11  # type: ignore[index]  # A1, V2, U2, U3, U4, CUR1, V3, S6, A3, A4, A5
     assert report["exit_code"] == 0
     assert (
         run_cli(full_synthetic_csv, tmp_path / "b", "--fail-on", "warn", config=config)
@@ -655,3 +668,39 @@ def test_archive_report_with_a_member_validates_against_the_schema(
     assert isinstance(run, dict)
     assert run["member"]["name"] == "d/x.csv"
     jsonschema.validate(report, json.loads(schema_text()))
+
+
+def test_report_arithmetic_section_shows_the_identity_breakdown(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(full_synthetic_csv, out)
+    text = (out / "report.md").read_text(encoding="utf-8")
+    section = text.split("## Arithmetic")[1].split("## Description parsing")[0]
+    pop = MANIFEST["USD.rides"]
+    for label, key in (
+        ("holds", "A7"),
+        ("total above", "A7.above"),
+        ("total below", "A7.below"),
+    ):
+        assert f"| {label} | {MANIFEST[key]:,} | {MANIFEST[key] / pop:.2%} |" in section
+    assert "| not computable | 0 | 0.00% |" in section
+    assert "cannot be an error rule" in section
+    assert f"{pop:,} rows in the population; median gap" in section
+    # in the JSON too, and valid against the schema
+    a7 = checks_by_name(load(out))["identity_share"]
+    assert a7["details"]["holds"] == MANIFEST["A7"]  # type: ignore[index]
+    jsonschema.validate(load(out), json.loads(schema_text()))
+
+
+def test_report_arithmetic_section_when_a7_is_disabled(
+    full_synthetic_csv: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    run_cli(
+        full_synthetic_csv,
+        out,
+        config="[checks.identity_share]\nenabled = false\n" + LOOSE_V2,
+    )
+    text = (out / "report.md").read_text(encoding="utf-8")
+    assert "_Not available: the identity_share check is disabled._" in text

@@ -53,6 +53,7 @@ def default_dataset_checks() -> tuple[DatasetCheck, ...]:
     """Return every registered dataset check."""
     return (
         *structural.dataset_checks(),
+        *arithmetic.dataset_checks(),
         *kinds.dataset_checks(),
         *uniqueness.dataset_checks(),
         *parsing.dataset_checks(),

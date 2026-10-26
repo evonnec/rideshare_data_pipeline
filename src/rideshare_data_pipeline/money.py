@@ -20,6 +20,12 @@ A row is in it when it:
 Rows outside it are flagged, never dropped; no exchange rate is applied (FX
 conversion is future work).
 
+Zero-total rides (flagged by A3, ``zero_fare_rides``) stay in the population, so spend
+sums include them (they add nothing). They are not fares, though: a per-ride average
+or an outlier baseline (#20) that includes them is dragged down and sees a $0 fare as
+ordinary. Those statistics must use ``positive_usd_rides`` (``order_total_amount >
+0``); negative totals are A1's and are excluded by the same filter.
+
 Two policy notes. Micromobility (bikes and scooters) is not rider spend: it stays out
 of the population and has its own line under the non-rider step of the waterfall
 (``micromobility``, a sub-line that is part of ``non_rider_spend``, so the steps
@@ -56,6 +62,12 @@ def usd_rides[F: (pl.DataFrame, pl.LazyFrame)](frame: F) -> F:
     return frame.filter(
         is_usd_rider_spend() & ~pl.col("is_superseded") & pl.col(AMOUNT).is_not_null()
     )
+
+
+def positive_usd_rides[F: (pl.DataFrame, pl.LazyFrame)](frame: F) -> F:
+    """``usd_rides`` with ``order_total_amount > 0``: the baseline for per-ride
+    averages and fare outliers (zero fares are A3's, negative totals A1's)."""
+    return usd_rides(frame).filter(pl.col(AMOUNT) > 0)
 
 
 def _step(mask: pl.Expr | None, name: str) -> list[pl.Expr]:

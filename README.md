@@ -188,6 +188,24 @@ The file has no currency column, yet receipts from non-US merchant senders state
 
 **PC1** (`description_parse_coverage`) leaves out the `Increase Tip` / `Tip Increase` stub lines of tip updates (compared trimmed and case-insensitively): they name no trip, so they can never carry a distance. Its rate is the **worst merchant unparsed rate**, not `n_failed / n_evaluated`; `details.merchants` has every merchant's rate.
 
+## Arithmetic checks
+
+`total = subtotal + tax - discount` does not hold row by row: tips, tolls and fees are not itemized, and many credits are missing from `order_discount`. About a third of ride rows match it exactly, so it is reported (A7), not enforced. The narrower relations that do hold are the rules:
+
+| id | check | severity | population | rule |
+|---|---|---|---|---|
+| A1 | `non_negative_total` | error | rider-spend receipts | total >= 0 |
+| A2 | `item_price_equals_subtotal` | error | both values present | abs(item_price - subtotal) <= 0.01 |
+| A3 | `zero_fare_rides` | warn | ride and tip-update receipts, not superseded | total is exactly 0 (per-merchant counts in `details.by_field`) |
+| A4 | `discount_within_subtotal` | warn | both values present | discount <= subtotal + 0.01 |
+| A5 | `tax_within_total` | warn | both values present | tax <= total + 0.01 |
+| A6 | `unexplained_residual` | warn | USD rider-spend ride receipts, not superseded | residual <= max(20, subtotal) |
+| A7 | `identity_share` | info | same as A6 | share of rows with abs(residual) <= 0.01; also the counts above, below and not computable, and the median gap above |
+
+The residual is `total - (subtotal + tax - discount)`. Nulls: A2, A4 and A5 skip a row with a null operand. A6 and A7 treat a null tax or discount as 0 and call a null total or subtotal "not computable" (never a failure). Amounts are compared in whole cents, so a 0.01 tolerance does not depend on float rounding. A6 flags only a positive residual (a total far above the itemized lines); a large negative one is an unlisted credit. On the real file that reading gives 2,011 rows against 2,179 for the absolute value. The report has an "Arithmetic" section with the A7 breakdown.
+
+Zero-total rides stay in spend sums, but they are not fares: per-ride averages and the outlier baselines (#20) must use `money.positive_usd_rides` (`order_total_amount > 0`).
+
 ## Configuration
 
 Defaults live in code (`QCConfig` in `config.py`); a TOML file overrides them. [`qc.example.toml`](qc.example.toml) lists every check with its default:
@@ -269,7 +287,7 @@ src/rideshare_data_pipeline/
                       every RowRule is counted in one lazy select, then the samples of
                       the failing rules are collected in one batch
     model.py          Severity, CheckResult, RowRule, DatasetCheck
-    arithmetic.py     row rules: non_negative_total (A1)
+    arithmetic.py     row rules A1-A6, dataset check A7
     uniqueness.py     checksum_unique (U1), duplicate_receipts (U2), dedupe_key_unique (U2b), cross_panelist_duplicates (U3), near_duplicate_rides (U4)
     kinds.py          category_mismatch (V2), receipt_kinds (K1) and unclassified_subject_templates
     parsing.py        description_parse_coverage (PC1)
@@ -305,7 +323,7 @@ Planned work is tracked in the GitHub issues:
 - Data hygiene and the input contract: guarding against committing data (#6), schema, header and encoding validation (#8), hardened extraction and a Parquet cache (#17).
 - Check framework and reporting: the CheckResult model and runner (#9), a synthetic fixture generator (#10), and the JSON and Markdown report with exit codes and TOML thresholds (#11, done).
 - Receipt semantics: receipt kinds and subject tags (#12, done), duplicate receipts and the dedupe policy (#13), parsing distance and duration from product descriptions (#14), and sender country and currency (#15, done).
-- Checks: structural and completeness (#16, done), arithmetic (#18), temporal (#19), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
+- Checks: structural and completeness (#16, done), arithmetic (#18, done), temporal (#19), fare outliers (#20), trip plausibility (#21), per-panelist behaviour (#26), volume and spend anomalies (#27), panel coverage (#28), and drift between delivery batches (#29).
 - Outputs: a curated Parquet dataset with per-row QC flags (#22), privacy normalization (#30), and a stakeholder summary (#31).
 - Tests and docs: edge-case inputs (#23), end-to-end and performance tests (#24), and the full README (#25).
 
