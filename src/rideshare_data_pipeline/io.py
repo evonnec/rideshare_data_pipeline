@@ -554,17 +554,19 @@ def read_raw(path: StrPath, *, inspected: FileFacts | None = None) -> pl.LazyFra
     cast_failures().
     """
     path = Path(path)
-    if inspected is None:
-        inspect_csv(path)
+    facts = inspect_csv(path) if inspected is None else inspected
     # polars strips a BOM and accepts CRLF or LF itself. A row with too many
     # fields makes the collect fail; one with too few is padded with nulls, which
     # isn't detected (see the ragged-row check planned in the edge-case suite).
+    lf = pl.scan_csv(path, infer_schema=False)
+    if facts.blank_lines == 0:
+        # The byte scan found no blank line, so skip a 33-column filter over
+        # every row (about 0.3 s on the full sample).
+        return lf
     # polars has no option to skip blank lines: it reads each as a row of nulls, so
     # rows with no value at all are dropped here (FileFacts.blank_lines counts
     # them). No real row is all-null: C1's required fields are never null.
-    return pl.scan_csv(path, infer_schema=False).filter(
-        pl.any_horizontal(pl.all().is_not_null())
-    )
+    return lf.filter(pl.any_horizontal(pl.all().is_not_null()))
 
 
 def typed(lf: pl.LazyFrame) -> pl.LazyFrame:
